@@ -429,11 +429,35 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
       }
       if (eventIdx == -1) return 0;
-      if (timings.length == tokens.length) {
-        return eventIdx.clamp(0, tokens.length - 1);
-      }
       final ratio = eventIdx / max(1, timings.length - 1);
-      return (ratio * (tokens.length - 1)).round().clamp(0, tokens.length - 1);
+      final expectedIdx = (ratio * (tokens.length - 1)).round().clamp(0, tokens.length - 1);
+
+      final spokenWord = timings[eventIdx]
+          .word
+          .toLowerCase()
+          .replaceAll(RegExp(r'[^a-záéíóúñü0-9]'), '');
+      if (spokenWord.isNotEmpty) {
+        final minSearch = max(0, expectedIdx - 4);
+        final maxSearch = min(tokens.length - 1, expectedIdx + 4);
+        int bestIdx = expectedIdx;
+        int bestDist = 999;
+        for (int k = minSearch; k <= maxSearch; k++) {
+          final cleanToken = tokens[k]
+              .toLowerCase()
+              .replaceAll(RegExp(r'[^a-záéíóúñü0-9]'), '');
+          if (cleanToken == spokenWord ||
+              (spokenWord.length >= 4 && cleanToken.startsWith(spokenWord))) {
+            final dist = (k - expectedIdx).abs();
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestIdx = k;
+            }
+          }
+        }
+        return bestIdx;
+      }
+
+      return expectedIdx;
     }
 
     final totalMs = max(1200, _duration.inMilliseconds);

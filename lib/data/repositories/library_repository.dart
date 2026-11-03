@@ -3,7 +3,9 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../../core/utils/text_sanitizer.dart';
 import '../../domain/models/book_item.dart';
+import '../../domain/models/chapter_item.dart';
 import '../services/cover_service.dart';
 
 /// Repositorio único de verdad para la Biblioteca de libros y sus archivos en disco
@@ -19,12 +21,44 @@ class LibraryRepository {
       final loaded = jsonList
           .map((item) => BookItem.fromJson(jsonDecode(item) as Map<String, dynamic>))
           .toList();
+
+      // Limpiar y armonizar también los libros que ya estaban cargados en la biblioteca
+      final List<BookItem> sanitizedBooks = [];
       for (final b in loaded) {
         if (b.id == 'oakley_numeros' && (b.coverUrl == null || b.coverUrl!.isEmpty)) {
           b.coverUrl = sampleOakleyBook.coverUrl;
         }
+        final cleanChapters = b.chapters.map((ch) {
+          return ChapterItem(
+            id: ch.id,
+            title: TextSanitizer.sanitizeExtractedText(ch.title),
+            subtitle: ch.subtitle,
+            durationText: ch.durationText,
+            textContent: TextSanitizer.sanitizeExtractedText(ch.textContent),
+          );
+        }).toList();
+
+        sanitizedBooks.add(
+          BookItem(
+            id: b.id,
+            title: b.title,
+            author: b.author,
+            coverTag: b.coverTag,
+            totalTime: b.totalTime,
+            chapters: cleanChapters,
+            isFavorite: b.isFavorite,
+            coverImagePath: b.coverImagePath,
+            coverUrl: b.coverUrl,
+            originalFilePath: b.originalFilePath,
+            fileType: b.fileType,
+            lastChapterIndex: b.lastChapterIndex,
+            lastSegmentIndex: b.lastSegmentIndex,
+            lastPositionMs: b.lastPositionMs,
+            totalSegmentsInLastChapter: b.totalSegmentsInLastChapter,
+          ),
+        );
       }
-      return loaded;
+      return sanitizedBooks;
     } else {
       final initial = [sampleOakleyBook];
       await saveBooks(initial);

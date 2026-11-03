@@ -12,6 +12,7 @@ import '../../domain/models/word_timing_item.dart';
 class TtsSynthesisService {
   final Map<String, List<WordTimingItem>> _segmentWordTimings = {};
   final Map<String, Future<File>> _inFlightSynthesis = {};
+  static bool _oldCachePurged = false;
 
   static const Map<String, String> voicesMap = {
     'es-MX-JorgeNeural': 'Jorge HD (México 🇲🇽 • Cálido)',
@@ -24,8 +25,28 @@ class TtsSynthesisService {
     'es-MX-DaliaNeural': 'Dalia HD (México 🇲🇽 • Clara)',
   };
 
+  /// Versión v3 invalida automáticamente cualquier audio viejo que tuviera el bug de "$1"
   String segmentKeyId(String bookId, ChapterItem chapter, int segIdx, String voiceKey) {
-    return '${bookId}_ch${chapter.id}_s${segIdx}_${voiceKey}_hd96';
+    return '${bookId}_ch${chapter.id}_s${segIdx}_${voiceKey}_hd96_v3';
+  }
+
+  /// Limpia en segundo plano los audios cacheados de versiones anteriores (_hd96)
+  Future<void> purgeLegacyCacheIfNeeded() async {
+    if (_oldCachePurged) return;
+    _oldCachePurged = true;
+    try {
+      final docDir = await getApplicationDocumentsDirectory();
+      if (!await docDir.exists()) return;
+      final entities = docDir.listSync();
+      for (final entity in entities) {
+        if (entity is File &&
+            (entity.path.endsWith('_hd96.mp3') || entity.path.endsWith('_hd96.words.json'))) {
+          try {
+            await entity.delete();
+          } catch (_) {}
+        }
+      }
+    } catch (_) {}
   }
 
   List<WordTimingItem>? getWordTimings(
@@ -55,6 +76,7 @@ class TtsSynthesisService {
     required String text,
     required String voiceKey,
   }) {
+    purgeLegacyCacheIfNeeded();
     final key = segmentKeyId(bookId, chapter, segIdx, voiceKey);
     if (_inFlightSynthesis.containsKey(key)) {
       return _inFlightSynthesis[key]!;
@@ -94,7 +116,7 @@ class TtsSynthesisService {
     final tts = Communicate(
       text: cleanSpeakText,
       voice: voiceKey,
-      rate: '-3%',
+      rate: '-4%',
       pitch: '-2Hz',
       volume: '+0%',
       wordBoundary: true,

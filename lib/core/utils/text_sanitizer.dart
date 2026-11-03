@@ -1,21 +1,58 @@
 class TextSanitizer {
-  /// Limpia texto extraído de PDF o EPUB (une guiones cortados, separa palabras pegadas, limpia índices)
+  /// Limpia profundamente el texto extraído de cualquier PDF o EPUB, tanto al importar
+  /// como en tiempo real antes de mostrarlo y narrarlo.
+  /// - Elimina citas bibliográficas [12], (12), superíndices ¹², asteriscos y símbolos raros
+  /// - Limpia signos « » sueltos, barras, guiones rotos y números de página huérfanos
+  /// - Une iniciales de nombres ("Gordon W.\nAllport" -> "Gordon W. Allport")
   static String sanitizeExtractedText(String raw) {
-    var s = raw.replaceAll('\r\n', '\n');
+    if (raw.isEmpty) return '';
 
-    // 1. Unir palabras cortadas por guión al final de línea en PDFs ("pro-\nceso" -> "proceso")
+    var s = raw
+        .replaceAll('\r\n', '\n')
+        .replaceAll('\r', '\n')
+        .replaceAll('\u00A0', ' ') // Non-breaking space
+        .replaceAll('\u00AD', ''); // Soft hyphen invisible en PDFs/EPUBs
+
+    // 1. Eliminar referencias de notas al pie y citas bibliográficas que interrumpen la lectura: [12], [1, 2], ¹²³
+    s = s
+        .replaceAll(RegExp(r'\[\s*\d+(?:\s*[,;-]\s*\d+)*\s*\]'), ' ')
+        .replaceAll(RegExp(r'\(\s*\d{1,3}\s*\)'), ' ')
+        .replaceAll(RegExp(r'[¹²³⁴⁵⁶⁷⁸⁹⁰]+'), '')
+        .replaceAll(RegExp(r'[\*†‡§¶‖#•●▪▫►◄◆◇¤¦¨©®™°±²³´µ¸¹º¼½¾]'), ' ');
+
+    // 2. Eliminar URLs, correos o rutas técnicas sueltas que ensucian los libros
+    s = s
+        .replaceAll(RegExp(r'https?://\S+'), '')
+        .replaceAll(RegExp(r'www\.\S+'), '');
+
+    // 3. Eliminar números de página huérfanos en líneas solas (ej. "\n 42 \n" o "\n- 42 -\n" o "Página 42")
+    s = s
+        .replaceAll(RegExp(r'\n\s*[-–—]?\s*\d{1,4}\s*[-–—]?\s*(?=\n)'), '\n')
+        .replaceAll(RegExp(r'\b[Pp]áginas?\s+\d+\s*(?:a|al|-)\s*\d+\b'), '');
+
+    // 4. Unir palabras cortadas por guión al final de línea en PDFs ("pro-\nceso" -> "proceso")
     s = s.replaceAllMapped(
-      RegExp(r'([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ])-\s*\n\s*([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ])'),
+      RegExp(r'([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ])[-‐‑‒–]\s*\n\s*([a-záéíóúñü])'),
       (m) => '${m.group(1)}${m.group(2)}',
     );
 
-    // 2. Separar palabras pegadas por minúscula seguida de mayúscula: "cansancioTraducción" -> "cansancio. Traducción"
+    // 5. Proteger y unir iniciales de nombres propios cortadas por salto de línea ("Gordon W.\nAllport" -> "Gordon W. Allport")
+    s = s.replaceAllMapped(
+      RegExp(r'\b([A-ZÁÉÍÓÚÑ])\.\s*\n+\s*([A-ZÁÉÍÓÚÑ][a-záéíóúñü]+)'),
+      (m) => '${m.group(1)}. ${m.group(2)}',
+    );
+    s = s.replaceAllMapped(
+      RegExp(r'\b(Dr|Dra|Sr|Sra|Srta|Prof|Lic|Ing|St|San|Sta|Cap|Pág|Art|Vol|Núm|Ed)\.\s*\n+\s*([A-ZÁÉÍÓÚÑa-záéíóúñü])'),
+      (m) => '${m.group(1)}. ${m.group(2)}',
+    );
+
+    // 6. Separar palabras pegadas por minúscula seguida de mayúscula: "cansancioTraducción" -> "cansancio. Traducción"
     s = s.replaceAllMapped(
       RegExp(r'([a-záéíóúñü])([A-ZÁÉÍÓÚÑÜ])'),
       (m) => '${m.group(1)}. ${m.group(2)}',
     );
 
-    // 3. Separar números pegados a letras o comas pegadas ("2010,MSB" -> "2010, MSB", "om1ª" -> "om 1ª")
+    // 7. Separar números pegados a letras o comas pegadas ("2010,MSB" -> "2010, MSB", "om1ª" -> "om 1ª")
     s = s.replaceAllMapped(
       RegExp(r'([0-9]),([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ])'),
       (m) => '${m.group(1)}, ${m.group(2)}',
@@ -33,18 +70,45 @@ class TextSanitizer {
       (m) => '${m.group(1)} ${m.group(2)}',
     );
 
-    // 4. Eliminar hileras de puntos de índices visuales
+    // 8. Limpiar comillas angulares « » y comillas sueltas con espacios ("« intención paradójica » ." -> '"intención paradójica".')
+    // Así nunca queda un símbolo « o » suelto como palabra en el Karaoke ni genera "$1"
+    s = s
+        .replaceAll(RegExp(r'[«‹„“]+\s*'), '"')
+        .replaceAll(RegExp(r'\s*[»›”]+'), '"')
+        .replaceAll(RegExp(r'<<+\s*'), '"')
+        .replaceAll(RegExp(r'\s*>>+'), '"');
+
+    // Si hay espacio antes de punto, coma, punto y coma, dos puntos o cierre de interrogación/exclamación: pegarlo a la palabra
+    s = s.replaceAllMapped(
+      RegExp(r'\s+([,\.\;\:\!\?\”\"])'),
+      (m) => m.group(1)!,
+    );
+    // Y si quedó `".` o `",` normalizar el orden limpio
+    s = s.replaceAllMapped(
+      RegExp(r'"\s+([,\.\;\:\!\?])'),
+      (m) => '"${m.group(1)}',
+    );
+
+    // 9. Limpiar barras (/ , \ , |), guiones bajos (_) y corchetes/llaves residuales
+    s = s
+        .replaceAll(RegExp(r'\s*[/\\|]\s*'), ', ')
+        .replaceAll(RegExp(r'[_\[\]\{\}<>~^`]+'), ' ');
+
+    // 10. Eliminar hileras de puntos de índices visuales ("....... 24")
     s = s
         .replaceAll(RegExp(r'\.{3,}\s*\d*'), '. ')
         .replaceAll(RegExp(r'…+\s*\d*'), '. ');
 
-    // 5. Unir saltos de línea simples dentro de un mismo párrafo para que el TTS no haga pausas robóticas a mitad de frase
+    // 11. Unir saltos de línea simples dentro de un mismo párrafo para que la lectura sea continua y armónica
     s = s.replaceAllMapped(
-      RegExp(r'([^\.\!\?\:\n])\n([a-záéíóúñü0-9“"«\(])'),
+      RegExp(r'([^\.\!\?\:\n])\n\s*([a-záéíóúñüA-ZÁÉÍÓÚÑÜ0-9"“\(])'),
       (m) => '${m.group(1)} ${m.group(2)}',
     );
 
+    // 12. Limpiar signos de puntuación repetidos (", ," o "..") y espacios múltiples
     s = s
+        .replaceAll(RegExp(r',\s*,+'), ', ')
+        .replaceAll(RegExp(r'\.\s*\.+'), '. ')
         .replaceAll(RegExp(r'[ \t]{2,}'), ' ')
         .replaceAll(RegExp(r'\n{3,}'), '\n\n')
         .trim();
@@ -87,43 +151,121 @@ class TextSanitizer {
     return false;
   }
 
-  /// Prepara el texto específicamente para que el motor neuronal respire y entone como un narrador humano profesional
+  /// Prepara el texto específicamente para el motor neuronal (Edge-TTS) con pausas
+  /// respiratorias, cadencia de audiolibro/podcast profesional y cero símbolos leídos en voz alta.
   static String humanizeTextForNaturalSpeech(String text) {
     var s = sanitizeExtractedText(text);
+
+    // 1. Limpiar cualquier rastro de "$1" por si viniera de texto viejo
+    s = s.replaceAll(r'$1', '');
+
+    // 2. En iniciales de nombres ("Gordon W. Allport" -> "Gordon W Allport"), quitar el punto
+    // para que el narrador NO haga una pausa muerta a mitad del nombre de una persona
+    s = s.replaceAllMapped(
+      RegExp(r'\b([A-ZÁÉÍÓÚÑ])\.\s+([A-ZÁÉÍÓÚÑ][a-záéíóúñü]+)'),
+      (m) => '${m.group(1)} ${m.group(2)}',
+    );
+
+    // 3. Dar pausa natural de locutor a frases entre comillas ("intención paradójica" -> ", intención paradójica, ")
+    // y eliminar todas las comillas para que el motor jamás tropiece con ellas
+    s = s.replaceAllMapped(
+      RegExp(r'([a-záéíóúñüA-ZÁÉÍÓÚÑ0-9])\s+"([^"]{2,120})"'),
+      (m) => '${m.group(1)}, ${m.group(2)}, ',
+    );
+    s = s.replaceAll(RegExp(r'[“”«»"‹›„‟\x27`]'), '');
+
+    // 4. Convertir guiones largos (incisos explicativos) y paréntesis en pausas suaves de coma
     s = s
-        .replaceAll(RegExp(r'[“”«»"]'), '')
-        .replaceAll('—', ', ')
-        .replaceAll('–', ', ')
+        .replaceAll(RegExp(r'\s*[—–―]\s*'), ', ')
         .replaceAll('(', ', ')
-        .replaceAll(')', ', ')
+        .replaceAll(')', ', ');
+
+    // 5. Dos puntos y punto y coma: asegurar pausa respiratoria clara antes de citas o enumeraciones
+    s = s
+        .replaceAll(RegExp(r'\s*:\s*'), ': ')
+        .replaceAll(RegExp(r'\s*;\s*'), '; ');
+
+    // 6. Expandir abreviaturas frecuentes para que el narrador las pronuncie completas con fluidez
+    s = s
         .replaceAll(RegExp(r'\bpágs?\.\s*', caseSensitive: false), 'páginas ')
         .replaceAll(RegExp(r'\bcap\.\s*', caseSensitive: false), 'capítulo ')
-        .replaceAll(RegExp(r'\bp\.\s*ej\.', caseSensitive: false), 'por ejemplo')
+        .replaceAll(RegExp(r'\bp\.\s*ej\.', caseSensitive: false), 'por ejemplo, ')
+        .replaceAll(RegExp(r'\be\.\s*g\.', caseSensitive: false), 'por ejemplo, ')
+        .replaceAll(RegExp(r'\bi\.\s*e\.', caseSensitive: false), 'es decir, ')
         .replaceAll(RegExp(r'\betc\.', caseSensitive: false), 'etcétera.')
         .replaceAll(RegExp(r'\bdr\.\s*', caseSensitive: false), 'doctor ')
         .replaceAll(RegExp(r'\bdra\.\s*', caseSensitive: false), 'doctora ')
-        .replaceAll(RegExp(r'\s+([,\.\;\:\!\?])'), r'$1')
-        .replaceAll(RegExp(r',\s*,+'), ',')
+        .replaceAll(RegExp(r'\bsr\.\s*', caseSensitive: false), 'señor ')
+        .replaceAll(RegExp(r'\bsra\.\s*', caseSensitive: false), 'señora ')
+        .replaceAll(RegExp(r'\bprof\.\s*', caseSensitive: false), 'profesor ')
+        .replaceAll(RegExp(r'\bvol\.\s*', caseSensitive: false), 'volumen ')
+        .replaceAll(RegExp(r'\bnúm\.\s*', caseSensitive: false), 'número ')
+        .replaceAll(RegExp(r'\bn\.º\s*', caseSensitive: false), 'número ')
+        .replaceAll(RegExp(r'\bnº\s*', caseSensitive: false), 'número ');
+
+    // 7. Asegurar micro-pausa natural después de conectores discursivos si no tienen coma
+    s = s.replaceAllMapped(
+      RegExp(
+        r'\b(Ahora bien|Sin embargo|No obstante|Por lo tanto|Por consiguiente|En conclusión|Por ejemplo|Es decir|En cambio|Además|Al mismo tiempo)\s+(?=[a-záéíóúñü])',
+      ),
+      (m) => '${m.group(1)}, ',
+    );
+
+    // 8. Pegar signos de puntuación a la palabra anterior USANDO replaceAllMapped (nunca replaceAll con $1)
+    s = s.replaceAllMapped(
+      RegExp(r'\s+([,\.\;\:\!\?])'),
+      (m) => m.group(1)!,
+    );
+
+    // 9. Asegurar espacio después de cualquier signo de puntuación seguido de letra
+    s = s.replaceAllMapped(
+      RegExp(r'([,\.\;\:\!\?])([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ])'),
+      (m) => '${m.group(1)} ${m.group(2)}',
+    );
+
+    // 10. Filtro final de seguridad: eliminar cualquier símbolo raro restante que no sea letra, número o puntuación hablada
+    s = s
+        .replaceAll(RegExp(r'[^a-zA-ZáéíóúÁÉÍÓÚñÑüÜ0-9\s,\.\;\:\!\?¿¡%\-]'), ' ')
+        .replaceAll(RegExp(r',\s*,+'), ', ')
+        .replaceAll(RegExp(r'\.\s*,+'), '. ')
+        .replaceAll(RegExp(r',\s*\.+'), '. ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
+
     return s.isEmpty ? 'Continuando lectura.' : s;
   }
 
-  /// Divide un capítulo largo en fragmentos óptimos (~420 caracteres) respetando límites de oración
+  /// Divide un capítulo largo en fragmentos óptimos (~380 caracteres) respetando límites de oración
+  /// y sin cortar jamás iniciales ("Gordon W. Allport") ni abreviaturas ("Dr. Frankl").
   static List<String> splitIntoSegments(String rawText) {
     final cleaned = sanitizeExtractedText(rawText)
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
     if (cleaned.isEmpty) return ['Capítulo listo para reproducir.'];
 
-    final sentences = cleaned.split(RegExp(r'(?<=[.!?])\s+'));
+    // Proteger temporalmente los puntos de iniciales ("W. ") y abreviaturas ("Dr. ") con un marcador
+    // para que el divisor de oraciones no parta a mitad de un nombre
+    const dotPlaceholder = '∯';
+    var protectedText = cleaned.replaceAllMapped(
+      RegExp(r'\b([A-ZÁÉÍÓÚÑ])\.\s+'),
+      (m) => '${m.group(1)}$dotPlaceholder ',
+    );
+    protectedText = protectedText.replaceAllMapped(
+      RegExp(
+        r'\b(Dr|Dra|Sr|Sra|Srta|Prof|Lic|Ing|St|San|Sta|Cap|Pág|Págs|Art|Vol|Núm|Ed|p\.\s*ej|etc)\.\s+',
+        caseSensitive: false,
+      ),
+      (m) => '${m.group(1)}$dotPlaceholder ',
+    );
+
+    final rawSentences = protectedText.split(RegExp(r'(?<=[.!?])\s+'));
     final List<String> result = [];
     StringBuffer current = StringBuffer();
 
-    for (final sentence in sentences) {
-      final sTrim = sentence.trim();
+    for (final rawSentence in rawSentences) {
+      final sTrim = rawSentence.replaceAll(dotPlaceholder, '.').trim();
       if (sTrim.isEmpty) continue;
-      if (current.length + sTrim.length > 420 && current.isNotEmpty) {
+      if (current.length + sTrim.length > 380 && current.isNotEmpty) {
         result.add(current.toString().trim());
         current.clear();
       }

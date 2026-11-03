@@ -1,5 +1,5 @@
 import 'package:flutter_test/flutter_test.dart';
-import 'package:audiomind/main.dart';
+import 'package:audiomind/app.dart';
 
 void main() {
   testWidgets('AudioMind app smoke test', (WidgetTester tester) async {

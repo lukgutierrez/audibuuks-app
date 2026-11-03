@@ -375,17 +375,25 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
     }
   }
 
-  void _openDocumentViewer(BookItem book, {int initialChapterIndex = 0}) {
+  void _openDocumentViewer(BookItem book, {int? initialChapterIndex}) {
+    final chIdx = (initialChapterIndex ?? book.lastChapterIndex)
+        .clamp(0, max<int>(0, book.chapters.length - 1));
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (_) => DocumentViewerScreen(
           book: book,
           player: globalAudioPlayer,
-          initialChapterIndex: initialChapterIndex,
-          onSeekToPosition: (chIdx, segIdx) {
-            if (chIdx < 0 || chIdx >= book.chapters.length) return;
-            final targetChapter = book.chapters[chIdx];
+          initialChapterIndex: chIdx,
+          activeSegmentIndex: book.lastSegmentIndex,
+          totalSegmentsInChapter: book.totalSegmentsInLastChapter,
+          onBookFileLinked: () {
+            setState(() {});
+            _saveBooks();
+          },
+          onSeekToPosition: (targetChIdx, segIdx) {
+            if (targetChIdx < 0 || targetChIdx >= book.chapters.length) return;
+            final targetChapter = book.chapters[targetChIdx];
             _openPlayer(book, targetChapter, startSegment: segIdx, startPositionMs: 0);
           },
         ),

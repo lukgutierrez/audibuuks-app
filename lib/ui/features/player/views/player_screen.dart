@@ -475,17 +475,193 @@ class _PlayerScreenState extends State<PlayerScreen>
     return tokens.length - 1;
   }
 
-  void _cycleSpeed() {
-    final speeds = [0.9, 1.0, 1.1, 1.2, 1.35];
-    final currentIdx = speeds.indexWhere((s) => (s - _playbackSpeed).abs() < 0.03);
-    final nextIndex = (currentIdx + 1) % speeds.length;
+  void _setPlaybackSpeed(double newSpeed) {
+    final clamped = (newSpeed * 20).round() / 20.0;
+    final safeSpeed = clamped.clamp(0.70, 2.00);
     setState(() {
-      _playbackSpeed = speeds[nextIndex];
+      _playbackSpeed = safeSpeed;
     });
     widget.player.setSpeed(_playbackSpeed);
     try {
       widget.player.setPitch(1.0);
     } catch (_) {}
+  }
+
+  void _showSpeedModal() {
+    final presets = <Map<String, dynamic>>[
+      {'speed': 0.75, 'label': '0.75x', 'desc': 'Lento'},
+      {'speed': 0.90, 'label': '0.9x', 'desc': 'Pausado'},
+      {'speed': 1.00, 'label': '1.0x', 'desc': 'Natural'},
+      {'speed': 1.10, 'label': '1.1x', 'desc': 'Fluido'},
+      {'speed': 1.25, 'label': '1.25x', 'desc': 'Ágil'},
+      {'speed': 1.50, 'label': '1.5x', 'desc': 'Rápido'},
+      {'speed': 1.75, 'label': '1.75x', 'desc': 'Veloz'},
+      {'speed': 2.00, 'label': '2.0x', 'desc': 'Máximo'},
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF181A20),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
+      ),
+      builder: (_) {
+        return StatefulBuilder(
+          builder: (ctx, setModalState) {
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(22, 14, 22, 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Container(
+                      width: 42,
+                      height: 4,
+                      decoration: BoxDecoration(
+                        color: Colors.white24,
+                        borderRadius: BorderRadius.circular(2),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.speed_rounded, color: Color(0xFFF5A623), size: 24),
+                            SizedBox(width: 10),
+                            Text(
+                              'Velocidad de Narración',
+                              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+                            ),
+                          ],
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF5A623).withValues(alpha: 0.18),
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(color: const Color(0xFFF5A623)),
+                          ),
+                          child: Text(
+                            '${_playbackSpeed.toStringAsFixed(_playbackSpeed % 0.1 == 0 ? 1 : 2)}x',
+                            style: const TextStyle(
+                              color: Color(0xFFF5A623),
+                              fontWeight: FontWeight.w900,
+                              fontSize: 16,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Ajustá el ritmo manteniendo el tono natural de la voz sin distorsión',
+                        style: TextStyle(color: Colors.white54, fontSize: 12.5),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        IconButton.filledTonal(
+                          style: IconButton.styleFrom(
+                            backgroundColor: Colors.white10,
+                            foregroundColor: Colors.white,
+                          ),
+                          icon: const Icon(Icons.remove_rounded),
+                          onPressed: () {
+                            _setPlaybackSpeed(_playbackSpeed - 0.05);
+                            setModalState(() {});
+                          },
+                        ),
+                        Expanded(
+                          child: Slider(
+                            value: _playbackSpeed.clamp(0.70, 2.00),
+                            min: 0.70,
+                            max: 2.00,
+                            divisions: 26,
+                            activeColor: const Color(0xFFF5A623),
+                            inactiveColor: Colors.white12,
+                            onChanged: (val) {
+                              _setPlaybackSpeed(val);
+                              setModalState(() {});
+                            },
+                          ),
+                        ),
+                        IconButton.filledTonal(
+                          style: IconButton.styleFrom(
+                            backgroundColor: Colors.white10,
+                            foregroundColor: Colors.white,
+                          ),
+                          icon: const Icon(Icons.add_rounded),
+                          onPressed: () {
+                            _setPlaybackSpeed(_playbackSpeed + 0.05);
+                            setModalState(() {});
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      alignment: WrapAlignment.center,
+                      children: presets.map((p) {
+                        final double sp = p['speed'] as double;
+                        final bool isSelected = (_playbackSpeed - sp).abs() < 0.03;
+                        return InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: () {
+                            _setPlaybackSpeed(sp);
+                            setModalState(() {});
+                          },
+                          child: Container(
+                            width: 76,
+                            padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 6),
+                            decoration: BoxDecoration(
+                              color: isSelected
+                                  ? const Color(0xFFF5A623)
+                                  : Colors.white.withValues(alpha: 0.06),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: isSelected ? const Color(0xFFF5A623) : Colors.white12,
+                              ),
+                            ),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Text(
+                                  p['label'] as String,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 13.5,
+                                    color: isSelected ? Colors.black : Colors.white,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  p['desc'] as String,
+                                  style: TextStyle(
+                                    fontSize: 10.5,
+                                    color: isSelected ? Colors.black87 : Colors.white54,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   void _togglePlayPause() {
@@ -964,6 +1140,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         .indexWhere((c) => c.id == _currentChapter.id)
         .clamp(0, max<int>(0, widget.book.chapters.length - 1))
         .toInt();
+    final String? snippet = (_segments.isNotEmpty &&
+            _currentSegmentIndex >= 0 &&
+            _currentSegmentIndex < _segments.length)
+        ? _segments[_currentSegmentIndex]
+        : null;
+
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -971,6 +1153,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           book: widget.book,
           player: widget.player,
           initialChapterIndex: curIdx,
+          activeSegmentIndex: _currentSegmentIndex,
+          totalSegmentsInChapter: _segments.length,
+          currentSpokenSnippet: snippet,
+          onBookFileLinked: () {
+            _saveExactPositionNow();
+          },
           onSeekToPosition: (chIdx, segIdx) {
             if (chIdx < 0 || chIdx >= widget.book.chapters.length) return;
             final targetCh = widget.book.chapters[chIdx];
@@ -1522,7 +1710,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                   },
                 ),
                 InkWell(
-                  onTap: _cycleSpeed,
+                  onTap: _showSpeedModal,
                   borderRadius: BorderRadius.circular(10),
                   child: Container(
                     padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
@@ -1531,13 +1719,23 @@ class _PlayerScreenState extends State<PlayerScreen>
                       borderRadius: BorderRadius.circular(10),
                       border: Border.all(color: Colors.white12),
                     ),
-                    child: Text(
-                      '${_playbackSpeed}x',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.w800,
-                        fontSize: 14.5,
-                        color: Color(0xFFF5A623),
-                      ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Text(
+                          '${_playbackSpeed.toStringAsFixed(_playbackSpeed % 0.1 == 0 ? 1 : 2)}x',
+                          style: const TextStyle(
+                            fontWeight: FontWeight.w800,
+                            fontSize: 14.5,
+                            color: Color(0xFFF5A623),
+                          ),
+                        ),
+                        const Icon(
+                          Icons.arrow_drop_up_rounded,
+                          size: 16,
+                          color: Color(0xFFF5A623),
+                        ),
+                      ],
                     ),
                   ),
                 ),

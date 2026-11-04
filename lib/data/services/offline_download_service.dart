@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../../domain/models/book_item.dart';
 import '../../domain/models/chapter_item.dart';
@@ -82,7 +83,7 @@ class OfflineDownloadService extends ChangeNotifier {
     return count;
   }
 
-  /// Inicia la descarga completa de un capítulo en segundo plano
+  /// Inicia la descarga completa de un capítulo en segundo plano (lotes de a 3 en paralelo)
   Future<void> downloadChapter({
     required String bookId,
     required ChapterItem chapter,
@@ -117,7 +118,6 @@ class OfflineDownloadService extends ChangeNotifier {
 
     if (downloaded >= segs.length) return;
 
-    // Descargar en lotes paralelos de 3 segmentos simultáneos (acelera la descarga 300%)
     const int batchSize = 3;
     for (int i = 0; i < segs.length; i += batchSize) {
       if (_cancelTokens.contains(key)) {
@@ -177,10 +177,6 @@ class OfflineDownloadService extends ChangeNotifier {
         chapterId: chapter.id,
         totalSegments: segs.length,
         downloadedSegments: downloaded,
-        status: DownloadStatus.downloading,
-      );
-      notifyListeners();
-    }
         status: DownloadStatus.downloading,
       );
       notifyListeners();

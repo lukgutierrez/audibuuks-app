@@ -98,6 +98,8 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
   int _pdfColorTheme = 0;
   bool _showPageSliderBar = false;
   bool _immersiveFullscreen = false;
+  // Dirección de deslizamiento de páginas en PDF: true = Horizontal, false = Vertical
+  bool _isVerticalScroll = false;
   // Modo de navegación: true = Sigue al audio automáticamente; false = Modo Libre (ojear sin mover el audio)
   bool _autoFollowAudio = true;
 
@@ -374,10 +376,14 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     return estimatedPage;
   }
 
-  /// Extrae y cachea las líneas y palabras con sus coordenadas exactas (Rect) de la página `pageIndex`
+  /// Extrae y cachea las líneas y palabras con sus coordenadas exactas (Rect) SOLO cuando la página está en pantalla
   PdfPageOverlayData? _ensurePageOverlayExtracted(int pageIndex) {
     if (_pdfOverlayCache.containsKey(pageIndex)) {
       return _pdfOverlayCache[pageIndex];
+    }
+    // Si estamos en Modo Libre y es una página lejana al audio, no bloquear el hilo con extracción sincrónica
+    if (!_autoFollowAudio && pageIndex != _audioSyncedPdfPage) {
+      return null;
     }
     if (_pdfDoc == null || _pdfTextExtractor == null) return null;
     if (pageIndex < 0 || pageIndex >= _pdfDoc!.pages.count) return null;
@@ -710,12 +716,18 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     widget.onSeekToPosition?.call(info.chapterIndex, targetSeg);
   }
 
-  /// Si el usuario toca directamente una línea o párrafo sobre la hoja del PDF, salta el audio y el subrayado a esa línea exacta
+  /// Si el usuario toca directamente una línea o párrafo sobre la hoja del PDF
   void _onTapPdfPagePosition(
     TapUpDetails details,
     Size renderedBoxSize,
     int pageIndex,
   ) {
+    // Si estamos en Modo Libre, un toque en la hoja alterna la barra completa (Modo Pantalla Completa Limpio)
+    if (!_autoFollowAudio) {
+      setState(() => _immersiveFullscreen = !_immersiveFullscreen);
+      return;
+    }
+
     final overlay = _ensurePageOverlayExtracted(pageIndex);
     if (overlay == null || overlay.lines.isEmpty) {
       setState(() => _immersiveFullscreen = !_immersiveFullscreen);
@@ -902,7 +914,9 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
 
   Future<void> _loadPdfPage(int pageIndex) async {
     if (pageIndex < 0 || (_totalPdfPages > 0 && pageIndex >= _totalPdfPages)) return;
-    _ensurePageOverlayExtracted(pageIndex);
+    if (_autoFollowAudio || pageIndex == _audioSyncedPdfPage) {
+      _ensurePageOverlayExtracted(pageIndex);
+    }
     if (_pdfPageCache.containsKey(pageIndex)) return;
     final path = widget.book.originalFilePath;
     if (path == null) return;
@@ -1196,6 +1210,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       children: [
         PageView.builder(
           controller: _pdfPageController,
+          scrollDirection: _isVerticalScroll ? Axis.vertical : Axis.horizontal,
           itemCount: _totalPdfPages,
           onPageChanged: (pageIdx) {
             setState(() {
@@ -1523,6 +1538,22 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                     onPressed: () {
                       setState(() {
                         _showPageSliderBar = !_showPageSliderBar;
+                      });
+                    },
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      _isVerticalScroll
+                          ? Icons.swap_vert_rounded
+                          : Icons.swap_horiz_rounded,
+                      color: _isVerticalScroll ? const Color(0xFFF5A623) : Colors.white70,
+                    ),
+                    tooltip: _isVerticalScroll
+                        ? 'Desplazamiento Vertical (Tocá para Horizontal)'
+                        : 'Desplazamiento Horizontal (Tocá para Vertical)',
+                    onPressed: () {
+                      setState(() {
+                        _isVerticalScroll = !_isVerticalScroll;
                       });
                     },
                   ),

@@ -775,7 +775,14 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     final segs = info.chapter.segments;
     if (segs.isEmpty) return;
 
-    final tappedTokens = tappedLine.words
+    // 1. Recolectar las líneas del bloque alrededor del toque
+    int tappedLineIdx = overlay.lines.indexOf(tappedLine);
+    final blockLines = <PdfNormalizedLine>[];
+    for (int k = max(0, tappedLineIdx - 2); k <= min(overlay.lines.length - 1, tappedLineIdx + 4); k++) {
+      blockLines.add(overlay.lines[k]);
+    }
+    final tappedBlockTokens = blockLines
+        .expand((l) => l.words)
         .map((w) => w.cleanToken)
         .where((t) => t.length >= 3)
         .toList();
@@ -784,7 +791,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     int bestSegIdx = info.startSeg;
     int bestScore = -1;
 
-    // Buscamos primero en el capítulo estimado y en los capítulos vecinos para máxima exactitud
+    // Buscamos primero en el capítulo de esta página y en los capítulos vecinos
     final candidateChIndices = <int>{
       info.chapterIndex,
       if (info.chapterIndex > 0) info.chapterIndex - 1,
@@ -795,35 +802,54 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       final ch = widget.book.chapters[cIdx];
       final segs = ch.segments;
       for (int s = 0; s < segs.length; s++) {
-        final cleanSeg = segs[s]
+        final segWords = segs[s]
             .split(RegExp(r'\s+'))
             .map(_normalizeToken)
-            .where((w) => w.isNotEmpty)
-            .join(' ');
+            .where((w) => w.length >= 3)
+            .toList();
+        if (segWords.isEmpty) continue;
 
-        if (cleanSeg.contains(tappedLine.cleanText)) {
+        final segJoined = segWords.join(' ');
+
+        // Coincidencia exacta de frase
+        if (segJoined.contains(tappedLine.cleanText) || tappedLine.cleanText.contains(segJoined)) {
           bestChIdx = cIdx;
           bestSegIdx = s;
-          bestScore = 999;
+          bestScore = 9999;
           break;
         }
 
+        // Búsqueda por solapamiento de tokens ponderado
         int hits = 0;
-        for (final tok in tappedTokens) {
-          if (cleanSeg.contains(tok)) hits++;
+        final segTokenSet = segWords.toSet();
+        for (final tok in tappedBlockTokens) {
+          if (segTokenSet.contains(tok)) hits += 3;
         }
+        for (final tok in tappedLine.words.map((w) => w.cleanToken).where((t) => t.length >= 3)) {
+          if (segTokenSet.contains(tok)) hits += 5;
+        }
+
+        // Si el párrafo empieza con palabras clave similares al inicio de la línea tocada
+        if (tappedLine.words.isNotEmpty && segWords.isNotEmpty) {
+          if (tappedLine.words.first.cleanToken == segWords.first) {
+            hits += 15;
+          }
+        }
+
         if (cIdx == info.chapterIndex && s >= info.startSeg && s <= info.endSeg) {
-          hits += 1;
+          hits += 2;
         }
+
         if (hits > bestScore) {
           bestScore = hits;
           bestChIdx = cIdx;
           bestSegIdx = s;
         }
       }
-      if (bestScore >= 999) break;
+      if (bestScore >= 9999) break;
     }
 
+    // Actualizar inmediatamente estado local para sincronizar el resaltado y mostrar el spinner de preparación
     setState(() {
       _activeChapterIndex = bestChIdx;
       _liveAudioChapterIndex = bestChIdx;
@@ -832,6 +858,10 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       _livePosition = Duration.zero;
       _isSynthesizingText = true;
     });
+
+    // Pausar cualquier audio viejo mientras el nuevo segmento se sintetiza/carga
+    widget.player.pause();
+    NativeChannelService.pauseLoFi();
 
     widget.onSeekToPosition?.call(bestChIdx, bestSegIdx);
   }

@@ -98,6 +98,8 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
   int _pdfColorTheme = 0;
   bool _showPageSliderBar = false;
   bool _immersiveFullscreen = false;
+  // Modo de navegación: true = Sigue al audio automáticamente; false = Modo Libre (ojear sin mover el audio)
+  bool _autoFollowAudio = true;
 
   PageController? _pdfPageController;
   PdfDocument? _pdfDoc;
@@ -253,9 +255,9 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           _audioSyncedPdfPage = nextPage;
         });
 
-        // Si el audio cruza a la página siguiente mientras el usuario está viendo la hoja sincronizada,
-        // el PDF da vuelta la hoja automáticamente sin disparar un seek redundante.
+        // Si el usuario tiene activado el seguimiento del audio y el narrador cambia de hoja, pasamos la página sola.
         if (_viewerMode == 0 &&
+            _autoFollowAudio &&
             wasFollowingOnSyncedPage &&
             nextPage != _currentPdfPage &&
             _pdfPageController != null &&
@@ -912,6 +914,21 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     }
   }
 
+  void _jumpToAudioPosition() {
+    setState(() => _autoFollowAudio = true);
+    final targetPage = _findBestPdfPageForActiveSegment(_totalPdfPages);
+    if (_viewerMode == 0 && _totalPdfPages > 0) {
+      _isProgrammaticPageTurn = true;
+      _pdfPageController
+          ?.animateToPage(
+            targetPage,
+            duration: const Duration(milliseconds: 320),
+            curve: Curves.easeOutCubic,
+          )
+          .whenComplete(() => _isProgrammaticPageTurn = false);
+    }
+  }
+
   void _preloadPdfPages(List<int> pages) {
     for (final p in pages) {
       if (p >= 0 && p < _totalPdfPages && !_pdfPageCache.containsKey(p)) {
@@ -1040,27 +1057,51 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                 ),
               ),
               actions: [
-                IconButton(
-                  icon: Icon(
-                    Icons.border_color_rounded,
-                    size: 19,
-                    color: _viewerMode == 0 ? const Color(0xFFF5A623) : Colors.white54,
+                if (_viewerMode == 0 && _totalPdfPages > 0)
+                  InkWell(
+                    borderRadius: BorderRadius.circular(16),
+                    onTap: () {
+                      if (!_autoFollowAudio) {
+                        _jumpToAudioPosition();
+                      } else {
+                        setState(() => _autoFollowAudio = false);
+                      }
+                    },
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: _autoFollowAudio
+                            ? const Color(0xFFF5A623).withValues(alpha: 0.18)
+                            : Colors.white10,
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: _autoFollowAudio ? const Color(0xFFF5A623) : Colors.white24,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _autoFollowAudio
+                                ? Icons.sync_rounded
+                                : Icons.pan_tool_rounded,
+                            size: 14,
+                            color: _autoFollowAudio ? const Color(0xFFF5A623) : Colors.white70,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            _autoFollowAudio ? 'Sincronizado' : 'Modo Libre',
+                            style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold,
+                              color: _autoFollowAudio ? const Color(0xFFF5A623) : Colors.white70,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                  tooltip: 'Subrayado sincronizado activo',
-                  onPressed: () {
-                    final targetPage = _findBestPdfPageForActiveSegment(_totalPdfPages);
-                    if (_viewerMode == 0 && _totalPdfPages > 0) {
-                      _isProgrammaticPageTurn = true;
-                      _pdfPageController
-                          ?.animateToPage(
-                            targetPage,
-                            duration: const Duration(milliseconds: 320),
-                            curve: Curves.easeOutCubic,
-                          )
-                          .whenComplete(() => _isProgrammaticPageTurn = false);
-                    }
-                  },
-                ),
                 IconButton(
                   icon: const Icon(Icons.format_list_bulleted_rounded, color: Colors.white70),
                   tooltip: 'Capítulos',
@@ -1159,19 +1200,12 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           onPageChanged: (pageIdx) {
             setState(() {
               _currentPdfPage = pageIdx;
+              // Si el usuario pasa de página manualmente lejos del audio, entra en Modo Libre automático
+              if (!_isProgrammaticPageTurn && pageIdx != _audioSyncedPdfPage) {
+                _autoFollowAudio = false;
+              }
             });
             _preloadPdfPages([pageIdx - 1, pageIdx + 1, pageIdx + 2]);
-
-            // Si el usuario adelantó o retrocedió la página manualmente, espera 600ms a que termine de hojear
-            // y salta el audio suavemente a esa página sin interrumpir mientras desliza.
-            if (!_isProgrammaticPageTurn && pageIdx != _audioSyncedPdfPage) {
-              _pageTurnDebounceTimer?.cancel();
-              _pageTurnDebounceTimer = Timer(const Duration(milliseconds: 600), () {
-                if (mounted && _currentPdfPage == pageIdx) {
-                  _seekAudioToPdfPage(pageIdx);
-                }
-              });
-            }
           },
           itemBuilder: (context, pageIdx) {
             final bytes = _pdfPageCache[pageIdx];
@@ -1244,6 +1278,27 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
             );
           },
         ),
+        // Botón flotante para regresar al audio cuando estás ojeando en Modo Libre en otra página
+        if (!_immersiveFullscreen && !_autoFollowAudio && _currentPdfPage != _audioSyncedPdfPage)
+          Positioned(
+            right: 16,
+            bottom: 12,
+            child: FilledButton.icon(
+              style: FilledButton.styleFrom(
+                backgroundColor: const Color(0xFFF5A623),
+                foregroundColor: Colors.black,
+                elevation: 6,
+                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(22)),
+              ),
+              onPressed: _jumpToAudioPosition,
+              icon: const Icon(Icons.my_location_rounded, size: 16),
+              label: Text(
+                'Volver a Pág. ${_audioSyncedPdfPage + 1}',
+                style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 12.5),
+              ),
+            ),
+          ),
         if (_immersiveFullscreen)
           Positioned(
             top: MediaQuery.of(context).padding.top + 8,

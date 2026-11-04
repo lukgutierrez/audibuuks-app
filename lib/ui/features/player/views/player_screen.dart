@@ -62,6 +62,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   bool _isPlaying = false;
   bool _userRequestedPause = false;
   bool _isHandlingCompletion = false;
+  // Por defecto false = la barra mide el Capítulo actual (mucho más cómodo y preciso que las 10h del libro entero)
+  bool _sliderShowsFullBook = false;
   double? _draggingSliderSec;
   bool _isSynthesizing = false;
   String _statusMessage = '';
@@ -451,12 +453,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  Duration get _chapterTotalDuration {
+    return Duration(seconds: max(15, _currentChapter.estimatedTotalSeconds));
+  }
+
   Duration get _chapterElapsedPosition {
     if (_segments.isEmpty) return Duration.zero;
-    final totalSec = _currentChapter.estimatedTotalSeconds;
+    final totalSec = _chapterTotalDuration.inSeconds;
     final secPerSeg = totalSec / _segments.length;
     final baseSec = (_currentSegmentIndex * secPerSeg).round();
-    return Duration(seconds: baseSec + _position.inSeconds);
+    final elapsed = baseSec + _position.inSeconds;
+    return Duration(seconds: elapsed.clamp(0, totalSec));
   }
 
   Duration get _fullBookTotalDuration {
@@ -470,6 +477,17 @@ class _PlayerScreenState extends State<PlayerScreen>
       secBefore += ch.estimatedTotalSeconds;
     }
     return Duration(seconds: secBefore + _chapterElapsedPosition.inSeconds);
+  }
+
+  void _seekWithinCurrentChapter(double targetSeconds) {
+    if (_segments.isEmpty) return;
+    _userRequestedPause = false;
+    final totalSec = max(1, _chapterTotalDuration.inSeconds);
+    final ratio = (targetSeconds / totalSec).clamp(0.0, 0.999);
+    final targetSeg = (ratio * _segments.length)
+        .floor()
+        .clamp(0, max<int>(0, _segments.length - 1));
+    _playSegmentAtIndex(targetSeg, _synthesisGeneration);
   }
 
   void _seekAcrossFullBook(double targetSeconds) {
@@ -1154,6 +1172,12 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showChaptersModal() {
+    final currentChIdx =
+        widget.book.chapters.indexWhere((c) => c.id == _currentChapter.id);
+    final bookElapsedSec = _fullBookElapsedPosition.inSeconds;
+    final bookTotalSec = max(1, _fullBookTotalDuration.inSeconds);
+    final bookPercent = ((bookElapsedSec / bookTotalSec) * 100).clamp(0.0, 100.0).round();
+
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
@@ -1164,9 +1188,9 @@ class _PlayerScreenState extends State<PlayerScreen>
       builder: (_) {
         return DraggableScrollableSheet(
           expand: false,
-          initialChildSize: 0.70,
+          initialChildSize: 0.72,
           minChildSize: 0.45,
-          maxChildSize: 0.90,
+          maxChildSize: 0.92,
           builder: (_, scrollController) {
             return ListView(
               controller: scrollController,
@@ -1183,53 +1207,131 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                 ),
                 const SizedBox(height: 16),
-                Text(
-                  'Capítulos (${widget.book.chapters.length})',
-                  style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+                Row(
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Text(
+                      'Capítulos (${widget.book.chapters.length})',
+                      style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFF5A623).withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      child: Text(
+                        'Libro: $bookPercent% completado',
+                        style: const TextStyle(
+                          color: Color(0xFFF5A623),
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                  ],
                 ),
-                const SizedBox(height: 4),
+                const SizedBox(height: 6),
                 Text(
                   'Duración total del libro: ${widget.book.totalTime}',
                   style: const TextStyle(color: Colors.white54, fontSize: 12.5),
                 ),
                 const SizedBox(height: 14),
-                ...widget.book.chapters.map((ch) {
+                ...List.generate(widget.book.chapters.length, (idx) {
+                  final ch = widget.book.chapters[idx];
                   final isCurrent = _currentChapter.id == ch.id;
-                  return ListTile(
-                    contentPadding: EdgeInsets.zero,
-                    leading: CircleAvatar(
-                      radius: 16,
-                      backgroundColor: isCurrent
-                          ? const Color(0xFFF5A623)
-                          : const Color(0xFF2A2A2A),
-                      child: Text(
-                        ch.id.toString().padLeft(2, '0'),
+                  final isCompleted = currentChIdx != -1 && idx < currentChIdx;
+                  final double chProgress = isCurrent
+                      ? (_segments.isEmpty
+                          ? 0.0
+                          : ((_currentSegmentIndex + 1) / _segments.length).clamp(0.0, 1.0))
+                      : (isCompleted ? 1.0 : 0.0);
+
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 8),
+                    decoration: BoxDecoration(
+                      color: isCurrent
+                          ? const Color(0xFFF5A623).withValues(alpha: 0.12)
+                          : Colors.white.withValues(alpha: 0.03),
+                      borderRadius: BorderRadius.circular(14),
+                      border: Border.all(
+                        color: isCurrent
+                            ? const Color(0xFFF5A623).withValues(alpha: 0.5)
+                            : Colors.white10,
+                      ),
+                    ),
+                    child: ListTile(
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                      leading: CircleAvatar(
+                        radius: 17,
+                        backgroundColor: isCurrent
+                            ? const Color(0xFFF5A623)
+                            : (isCompleted
+                                ? Colors.green.withValues(alpha: 0.22)
+                                : const Color(0xFF2A2A2A)),
+                        child: isCompleted
+                            ? const Icon(Icons.check_rounded, size: 17, color: Colors.greenAccent)
+                            : Text(
+                                ch.id.toString().padLeft(2, '0'),
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.bold,
+                                  color: isCurrent ? Colors.black : Colors.white70,
+                                ),
+                              ),
+                      ),
+                      title: Text(
+                        ch.title,
                         style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
-                          color: isCurrent ? Colors.black : Colors.white70,
+                          color: isCurrent
+                              ? const Color(0xFFF5A623)
+                              : (isCompleted ? Colors.white70 : Colors.white),
+                          fontWeight: isCurrent ? FontWeight.bold : FontWeight.w500,
+                          fontSize: 14,
                         ),
                       ),
-                    ),
-                    title: Text(
-                      ch.title,
-                      style: TextStyle(
-                        color: isCurrent ? const Color(0xFFF5A623) : Colors.white,
-                        fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                      subtitle: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          const SizedBox(height: 3),
+                          Text(
+                            isCurrent
+                                ? 'En curso • Párrafo ${_currentSegmentIndex + 1} de ${_segments.length} (${(chProgress * 100).round()}%)'
+                                : (isCompleted
+                                    ? 'Completado • ${ch.subtitle}'
+                                    : ch.subtitle),
+                            style: TextStyle(
+                              color: isCurrent ? Colors.white70 : Colors.white54,
+                              fontSize: 11.5,
+                            ),
+                          ),
+                          if (isCurrent) ...[
+                            const SizedBox(height: 6),
+                            ClipRRect(
+                              borderRadius: BorderRadius.circular(4),
+                              child: LinearProgressIndicator(
+                                value: chProgress,
+                                minHeight: 4,
+                                backgroundColor: Colors.white12,
+                                valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFF5A623)),
+                              ),
+                            ),
+                          ],
+                        ],
                       ),
+                      trailing: Text(
+                        ch.durationText,
+                        style: TextStyle(
+                          color: isCurrent ? const Color(0xFFF5A623) : Colors.white38,
+                          fontSize: 12,
+                          fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                        ),
+                      ),
+                      onTap: () {
+                        Navigator.pop(context);
+                        _startChapterPlayback(ch, startSegment: 0);
+                      },
                     ),
-                    subtitle: Text(
-                      ch.subtitle,
-                      style: const TextStyle(color: Colors.white54, fontSize: 12),
-                    ),
-                    trailing: Text(
-                      ch.durationText,
-                      style: const TextStyle(color: Colors.white38, fontSize: 12),
-                    ),
-                    onTap: () {
-                      Navigator.pop(context);
-                      _startChapterPlayback(ch, startSegment: 0);
-                    },
                   );
                 }),
               ],
@@ -1664,21 +1766,43 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildUnifiedBottomControls() {
-    final Duration activeElapsed = _draggingSliderSec != null
-        ? Duration(seconds: _draggingSliderSec!.round())
-        : _fullBookElapsedPosition;
-    final Duration activeTotal = _fullBookTotalDuration;
+    // Por defecto (_sliderShowsFullBook == false) la barra controla SOLO el capítulo actual para máxima precisión.
+    final Duration baseElapsed =
+        _sliderShowsFullBook ? _fullBookElapsedPosition : _chapterElapsedPosition;
+    final Duration activeTotal =
+        _sliderShowsFullBook ? _fullBookTotalDuration : _chapterTotalDuration;
 
     final double maxSliderSec = max(1.0, activeTotal.inSeconds.toDouble());
     final double currentSliderSec = _draggingSliderSec != null
         ? _draggingSliderSec!.clamp(0.0, maxSliderSec)
-        : activeElapsed.inSeconds.toDouble().clamp(0.0, maxSliderSec);
+        : baseElapsed.inSeconds.toDouble().clamp(0.0, maxSliderSec);
+    final Duration activeElapsed = Duration(seconds: currentSliderSec.round());
 
     final int remainingSec = max(0, activeTotal.inSeconds - activeElapsed.inSeconds);
     final int remMins = remainingSec ~/ 60;
-    final String remainingLabel = remMins >= 60
-        ? '${remMins ~/ 60}h ${remMins % 60}m restantes'
-        : '${max(1, remMins)}m restantes';
+    final String remainingShort = remMins >= 60
+        ? '${remMins ~/ 60}h ${remMins % 60}m'
+        : '${max(1, remMins)}m';
+
+    final int bookPercent = ((_fullBookElapsedPosition.inSeconds /
+                max(1, _fullBookTotalDuration.inSeconds)) *
+            100)
+        .clamp(0.0, 100.0)
+        .round();
+
+    // Si está arrastrando en modo capítulo, calculamos a qué párrafo va a caer para mostrárselo en vivo
+    String? draggingPreviewText;
+    if (_draggingSliderSec != null && !_sliderShowsFullBook && _segments.isNotEmpty) {
+      final ratio = (currentSliderSec / maxSliderSec).clamp(0.0, 0.999);
+      final previewSeg = (ratio * _segments.length).floor() + 1;
+      draggingPreviewText =
+          'Ir al Párrafo $previewSeg de ${_segments.length} • ${TextSanitizer.formatDuration(activeElapsed)}';
+    }
+
+    final String centerBadgeLabel = draggingPreviewText ??
+        (_sliderShowsFullBook
+            ? 'Libro: $remainingShort rest. ($bookPercent%) ⇄'
+            : 'Cap: $remainingShort rest. • Libro $bookPercent% ⇄');
 
     return Container(
       padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
@@ -1704,7 +1828,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     const SizedBox(width: 6),
                     Flexible(
                       child: Text(
-                        _currentChapter.title,
+                        '${_currentChapter.title}  •  Párr. ${_currentSegmentIndex + 1}/${max(1, _segments.length)}',
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: const TextStyle(
@@ -1745,7 +1869,11 @@ class _PlayerScreenState extends State<PlayerScreen>
                   setState(() {
                     _draggingSliderSec = null;
                   });
-                  _seekAcrossFullBook(val);
+                  if (_sliderShowsFullBook) {
+                    _seekAcrossFullBook(val);
+                  } else {
+                    _seekWithinCurrentChapter(val);
+                  }
                 },
               ),
             ),
@@ -1758,12 +1886,31 @@ class _PlayerScreenState extends State<PlayerScreen>
                     TextSanitizer.formatDuration(activeElapsed),
                     style: const TextStyle(color: Colors.white60, fontSize: 12),
                   ),
-                  Text(
-                    remainingLabel,
-                    style: const TextStyle(
-                      color: Colors.white54,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w500,
+                  GestureDetector(
+                    onTap: () {
+                      setState(() {
+                        _draggingSliderSec = null;
+                        _sliderShowsFullBook = !_sliderShowsFullBook;
+                      });
+                    },
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.06),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        centerBadgeLabel,
+                        style: TextStyle(
+                          color: draggingPreviewText != null
+                              ? const Color(0xFFF5A623)
+                              : Colors.white70,
+                          fontSize: 11.5,
+                          fontWeight: draggingPreviewText != null
+                              ? FontWeight.w700
+                              : FontWeight.w500,
+                        ),
+                      ),
                     ),
                   ),
                   Text(

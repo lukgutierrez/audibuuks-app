@@ -10,6 +10,7 @@ import '../../../../core/utils/text_sanitizer.dart';
 import '../../../../data/repositories/library_repository.dart';
 import '../../../../data/services/cover_service.dart';
 import '../../../../data/services/native_channel_service.dart';
+import '../../../../data/services/offline_download_service.dart';
 import '../../../../data/services/tts_synthesis_service.dart';
 import '../../../../domain/models/ambient_track_info.dart';
 import '../../../../domain/models/book_item.dart';
@@ -48,6 +49,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   final LibraryRepository _repository = LibraryRepository();
   final TtsSynthesisService _ttsService = TtsSynthesisService();
+  final OfflineDownloadService _downloadService = OfflineDownloadService();
 
   late ChapterItem _currentChapter;
   // 0 = Modo Portada (YouTube Premium), 1 = Modo Texto Karaoke Minimalista
@@ -1244,20 +1246,54 @@ class _PlayerScreenState extends State<PlayerScreen>
                       'Capítulos (${widget.book.chapters.length})',
                       style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
                     ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFFF5A623).withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(12),
-                      ),
-                      child: Text(
-                        'Libro: $bookPercent% completado',
-                        style: const TextStyle(
-                          color: Color(0xFFF5A623),
-                          fontSize: 11.5,
-                          fontWeight: FontWeight.w700,
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        FilledButton.tonalIcon(
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFFF5A623).withValues(alpha: 0.16),
+                            foregroundColor: const Color(0xFFF5A623),
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          onPressed: () {
+                            _downloadService.downloadEntireBook(
+                              book: widget.book,
+                              voiceKey: _selectedVoiceKey,
+                            );
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Descargando libro completo en segundo plano...'),
+                                backgroundColor: Color(0xFFF5A623),
+                                behavior: SnackBarBehavior.floating,
+                                duration: Duration(seconds: 2),
+                              ),
+                            );
+                          },
+                          icon: const Icon(Icons.download_for_offline_rounded, size: 15),
+                          label: const Text(
+                            'Descargar todo',
+                            style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
+                          ),
                         ),
-                      ),
+                        const SizedBox(width: 8),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFFF5A623).withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: Text(
+                            '$bookPercent%',
+                            style: const TextStyle(
+                              color: Color(0xFFF5A623),
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w700,
+                            ),
+                          ),
+                        ),
+                      ],
                     ),
                   ],
                 ),
@@ -1349,13 +1385,84 @@ class _PlayerScreenState extends State<PlayerScreen>
                           ],
                         ],
                       ),
-                      trailing: Text(
-                        ch.durationText,
-                        style: TextStyle(
-                          color: isCurrent ? const Color(0xFFF5A623) : Colors.white38,
-                          fontSize: 12,
-                          fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
-                        ),
+                      trailing: AnimatedBuilder(
+                        animation: _downloadService,
+                        builder: (ctx, _) {
+                          final p = _downloadService.getProgress(widget.book.id, ch.id);
+                          final isDownloading = p?.status == DownloadStatus.downloading;
+
+                          return Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                ch.durationText,
+                                style: TextStyle(
+                                  color: isCurrent ? const Color(0xFFF5A623) : Colors.white38,
+                                  fontSize: 12,
+                                  fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              if (isDownloading)
+                                SizedBox(
+                                  width: 22,
+                                  height: 22,
+                                  child: CircularProgressIndicator(
+                                    value: p?.progressRatio,
+                                    strokeWidth: 2.4,
+                                    color: const Color(0xFFF5A623),
+                                  ),
+                                )
+                              else
+                                FutureBuilder<bool>(
+                                  future: _downloadService.isChapterFullyDownloaded(
+                                    bookId: widget.book.id,
+                                    chapter: ch,
+                                    voiceKey: _selectedVoiceKey,
+                                  ),
+                                  builder: (ctx, snap) {
+                                    final isOffline = snap.data == true;
+                                    return IconButton(
+                                      visualDensity: VisualDensity.compact,
+                                      icon: Icon(
+                                        isOffline
+                                            ? Icons.check_circle_rounded
+                                            : Icons.download_for_offline_outlined,
+                                        size: 20,
+                                        color: isOffline ? Colors.greenAccent : Colors.white38,
+                                      ),
+                                      tooltip: isOffline
+                                          ? 'Descargado offline (Tocá para borrar)'
+                                          : 'Descargar capítulo',
+                                      onPressed: () async {
+                                        if (isOffline) {
+                                          await _downloadService.deleteChapterDownload(
+                                            bookId: widget.book.id,
+                                            chapter: ch,
+                                            voiceKey: _selectedVoiceKey,
+                                          );
+                                          ScaffoldMessenger.of(context).showSnackBar(
+                                            SnackBar(
+                                              content: Text('Descarga eliminada: ${ch.title}'),
+                                              backgroundColor: Colors.white12,
+                                              behavior: SnackBarBehavior.floating,
+                                              duration: const Duration(seconds: 1),
+                                            ),
+                                          );
+                                        } else {
+                                          _downloadService.downloadChapter(
+                                            bookId: widget.book.id,
+                                            chapter: ch,
+                                            voiceKey: _selectedVoiceKey,
+                                          );
+                                        }
+                                      },
+                                    );
+                                  },
+                                ),
+                            ],
+                          );
+                        },
                       ),
                       onTap: () {
                         Navigator.pop(context);

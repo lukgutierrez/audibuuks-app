@@ -108,6 +108,9 @@ class TtsSynthesisService {
     return File('${bookDir.path}/$key.words.json');
   }
 
+  Future<File> getSegmentFilePublic(String bookId, String key) => _getSegmentFile(bookId, key);
+  Future<File> getSegmentWordsFilePublic(String bookId, String key) => _getSegmentWordsFile(bookId, key);
+
   /// Verifica rápido si este párrafo ya está descargado en la caché del celular (estilo YouTube Music)
   Future<bool> isSegmentCached({
     required String bookId,

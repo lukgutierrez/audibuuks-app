@@ -1249,33 +1249,50 @@ class _PlayerScreenState extends State<PlayerScreen>
                     Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
-                        FilledButton.tonalIcon(
-                          style: FilledButton.styleFrom(
-                            backgroundColor: const Color(0xFFF5A623).withValues(alpha: 0.16),
-                            foregroundColor: const Color(0xFFF5A623),
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                            minimumSize: Size.zero,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          onPressed: () {
-                            _downloadService.downloadEntireBook(
-                              book: widget.book,
-                              voiceKey: _selectedVoiceKey,
-                            );
-                            ScaffoldMessenger.of(context).showSnackBar(
-                              const SnackBar(
-                                content: Text('Descargando libro completo en segundo plano...'),
-                                backgroundColor: Color(0xFFF5A623),
-                                behavior: SnackBarBehavior.floating,
-                                duration: Duration(seconds: 2),
+                        AnimatedBuilder(
+                          animation: _downloadService,
+                          builder: (ctx, _) {
+                            final bookDl = _downloadService.getBookDownloadProgress(widget.book.id);
+                            final bool isBookDl = bookDl != null;
+
+                            return FilledButton.tonalIcon(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: isBookDl
+                                    ? const Color(0xFFF5A623).withValues(alpha: 0.28)
+                                    : const Color(0xFFF5A623).withValues(alpha: 0.16),
+                                foregroundColor: const Color(0xFFF5A623),
+                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                minimumSize: Size.zero,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              onPressed: () {
+                                if (isBookDl) {
+                                  _downloadService.cancelDownload(widget.book.id, -1);
+                                } else {
+                                  _downloadService.downloadEntireBook(
+                                    book: widget.book,
+                                    voiceKey: _selectedVoiceKey,
+                                  );
+                                }
+                              },
+                              icon: isBookDl
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Color(0xFFF5A623),
+                                      ),
+                                    )
+                                  : const Icon(Icons.download_for_offline_rounded, size: 15),
+                              label: Text(
+                                isBookDl
+                                    ? 'Descargando (${bookDl.completed}/${bookDl.total})'
+                                    : 'Descargar todo',
+                                style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
                               ),
                             );
                           },
-                          icon: const Icon(Icons.download_for_offline_rounded, size: 15),
-                          label: const Text(
-                            'Descargar todo',
-                            style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
-                          ),
                         ),
                         const SizedBox(width: 8),
                         Container(
@@ -1957,6 +1974,46 @@ class _PlayerScreenState extends State<PlayerScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Barra de progreso de descarga si el libro completo o un capítulo se está descargando
+            AnimatedBuilder(
+              animation: _downloadService,
+              builder: (ctx, _) {
+                final bookDl = _downloadService.getBookDownloadProgress(widget.book.id);
+                if (bookDl == null) return const SizedBox.shrink();
+
+                return Padding(
+                  padding: const EdgeInsets.only(bottom: 6),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.downloading_rounded, size: 14, color: Color(0xFFF5A623)),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          'Descargando audiolibro: capítulo ${bookDl.completed} de ${bookDl.total} (${(bookDl.ratio * 100).round()}%)',
+                          style: const TextStyle(
+                            color: Color(0xFFF5A623),
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(width: 8),
+                      SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(
+                          value: bookDl.ratio,
+                          strokeWidth: 2,
+                          color: const Color(0xFFF5A623),
+                        ),
+                      ),
+                    ],
+                  ),
+                );
+              },
+            ),
             GestureDetector(
               onTap: _showChaptersModal,
               child: Padding(

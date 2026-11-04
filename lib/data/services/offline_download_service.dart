@@ -36,6 +36,20 @@ class OfflineDownloadService extends ChangeNotifier {
   final TtsSynthesisService _ttsService = TtsSynthesisService();
   final Map<String, ChapterDownloadProgress> _chapterProgress = {};
   final Set<String> _cancelTokens = {};
+  String? _activeDownloadingBookId;
+  int _activeBookTotalChapters = 0;
+  int _activeBookCompletedChapters = 0;
+
+  bool isBookDownloading(String bookId) => _activeDownloadingBookId == bookId;
+
+  ({int completed, int total, double ratio})? getBookDownloadProgress(String bookId) {
+    if (_activeDownloadingBookId != bookId || _activeBookTotalChapters == 0) return null;
+    return (
+      completed: _activeBookCompletedChapters,
+      total: _activeBookTotalChapters,
+      ratio: (_activeBookCompletedChapters / _activeBookTotalChapters).clamp(0.0, 1.0),
+    );
+  }
 
   String _progressKey(String bookId, int chapterId) => '${bookId}_ch_$chapterId';
 
@@ -203,14 +217,32 @@ class OfflineDownloadService extends ChangeNotifier {
     required String voiceKey,
     void Function(int currentChapter, int totalChapters)? onBookProgress,
   }) async {
-    for (int i = 0; i < book.chapters.length; i++) {
-      final ch = book.chapters[i];
-      onBookProgress?.call(i + 1, book.chapters.length);
-      await downloadChapter(
-        bookId: book.id,
-        chapter: ch,
-        voiceKey: voiceKey,
-      );
+    _activeDownloadingBookId = book.id;
+    _activeBookTotalChapters = book.chapters.length;
+    _activeBookCompletedChapters = 0;
+    notifyListeners();
+
+    try {
+      for (int i = 0; i < book.chapters.length; i++) {
+        if (_cancelTokens.contains(book.id)) {
+          break;
+        }
+        final ch = book.chapters[i];
+        onBookProgress?.call(i + 1, book.chapters.length);
+        await downloadChapter(
+          bookId: book.id,
+          chapter: ch,
+          voiceKey: voiceKey,
+        );
+        _activeBookCompletedChapters = i + 1;
+        notifyListeners();
+      }
+    } finally {
+      _activeDownloadingBookId = null;
+      _activeBookTotalChapters = 0;
+      _activeBookCompletedChapters = 0;
+      _cancelTokens.remove(book.id);
+      notifyListeners();
     }
   }
 

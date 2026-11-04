@@ -585,39 +585,38 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       if (timings != null && timings.isNotEmpty) {
         int eventIdx = 0;
         for (int i = 0; i < timings.length; i++) {
-          if (posMs >= timings[i].startMs - 45) {
+          if (posMs >= timings[i].startMs) {
             eventIdx = i;
           } else {
             break;
           }
         }
-        final ratio = (eventIdx / max(1, timings.length - 1)).clamp(0.0, 1.0);
-        final expectedIdx = (ratio * (paragraphPdfWords.length - 1))
-            .round()
-            .clamp(0, paragraphPdfWords.length - 1);
         final spokenClean = _normalizeToken(timings[eventIdx].word);
 
-      // Tolerancia: si coincide la palabra o contiene los primeros 3 caracteres clave
-      if (spokenClean.isNotEmpty) {
-        final minSearch = max(0, expectedIdx - 6);
-        final maxSearch = min(paragraphPdfWords.length - 1, expectedIdx + 6);
-        int bestIdx = expectedIdx;
-        int bestDist = 999;
-        for (int k = minSearch; k <= maxSearch; k++) {
-          final candToken = paragraphPdfWords[k].cleanToken;
-          if (candToken == spokenClean ||
-              (spokenClean.length >= 3 && candToken.startsWith(spokenClean.substring(0, min(3, spokenClean.length))))) {
-            final dist = (k - expectedIdx).abs();
-            if (dist < bestDist) {
-              bestDist = dist;
+        // Alineación 1: Buscar si la palabra exacta pronunciada por TTS aparece en las palabras de esta hoja
+        int bestIdx = -1;
+        if (spokenClean.isNotEmpty) {
+          final expectedIdx = ((eventIdx / max(1, timings.length - 1)) * (paragraphPdfWords.length - 1))
+              .round()
+              .clamp(0, paragraphPdfWords.length - 1);
+          final minSearch = max(0, expectedIdx - 5);
+          final maxSearch = min(paragraphPdfWords.length - 1, expectedIdx + 5);
+
+          for (int k = minSearch; k <= maxSearch; k++) {
+            if (paragraphPdfWords[k].cleanToken == spokenClean) {
               bestIdx = k;
+              break;
             }
           }
         }
+
+        // Alineación 2: Si no hubo match exacto de token, alinear proporcionalmente por índice del evento TTS
+        if (bestIdx == -1) {
+          final ratio = (eventIdx / max(1, timings.length - 1)).clamp(0.0, 1.0);
+          bestIdx = (ratio * (paragraphPdfWords.length - 1)).round().clamp(0, paragraphPdfWords.length - 1);
+        }
+
         activeWordRect = paragraphPdfWords[bestIdx].normBounds;
-      } else {
-        activeWordRect = paragraphPdfWords[expectedIdx].normBounds;
-      }
       } else {
         final totalMs = max(1200, _liveDuration.inMilliseconds);
         final progress = (posMs / totalMs).clamp(0.0, 0.999);

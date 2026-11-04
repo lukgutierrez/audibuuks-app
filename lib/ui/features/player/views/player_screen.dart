@@ -307,6 +307,8 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     setState(() {
       _currentSegmentIndex = index;
+      widget.book.lastChapterIndex = widget.book.chapters.indexWhere((c) => c.id == chapter.id).clamp(0, widget.book.chapters.length - 1);
+      widget.book.lastSegmentIndex = index;
       if (!alreadyCached) {
         _isSynthesizing = true;
       } else {

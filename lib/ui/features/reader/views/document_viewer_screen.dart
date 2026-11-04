@@ -118,6 +118,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
   final Map<int, PdfPageOverlayData> _pdfOverlayCache = {};
   bool _hasLocalPdf = false;
   bool _isLoadingPdfPage = false;
+  bool _isSynthesizingText = false;
 
   // Estado en tiempo real del audio para subrayar línea y palabra exacta sobre el PDF
   late int _liveAudioChapterIndex;
@@ -184,8 +185,13 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     }
 
     _playerSub = widget.player.playerStateStream.listen((state) {
-      if (mounted && _isPlaying != state.playing) {
-        setState(() => _isPlaying = state.playing);
+      if (mounted) {
+        setState(() {
+          _isPlaying = state.playing;
+          if (state.playing) {
+            _isSynthesizingText = false;
+          }
+        });
       }
     });
 
@@ -500,41 +506,43 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     final segWordSet = segWords.where((w) => w.length >= 3).toSet();
     final String segJoined = segWords.join(' ');
 
-    // Buscamos el bloque contiguo de líneas en la página que mejor coincide con el párrafo actual
-    final List<int> matchedLineIndices = [];
+    // Buscamos el mejor grupo continuo de líneas que contenga el párrafo actual
+    int bestStart = -1;
+    int bestEnd = -1;
+    int maxContigHits = 0;
+
     for (int i = 0; i < overlay.lines.length; i++) {
-      final line = overlay.lines[i];
-      if (line.cleanText.isEmpty) continue;
-
-      if (segJoined.contains(line.cleanText) || line.cleanText.contains(segJoined)) {
-        matchedLineIndices.add(i);
-        continue;
-      }
-
-      final lineTokens = line.words
-          .map((w) => w.cleanToken)
-          .where((t) => t.length >= 3)
-          .toList();
-      if (lineTokens.isEmpty) continue;
-
-      int hits = 0;
-      for (final lt in lineTokens) {
-        if (segWordSet.contains(lt)) hits++;
-      }
-      final ratio = hits / lineTokens.length;
-      if (ratio >= 0.55 || (hits >= 3 && ratio >= 0.42)) {
-        matchedLineIndices.add(i);
+      int curHits = 0;
+      final Set<String> matchedWordsInBlock = {};
+      for (int j = i; j < min(overlay.lines.length, i + 9); j++) {
+        final line = overlay.lines[j];
+        for (final w in line.words) {
+          if (w.cleanToken.length >= 3 && segWordSet.contains(w.cleanToken)) {
+            matchedWordsInBlock.add(w.cleanToken);
+          }
+        }
+        curHits = matchedWordsInBlock.length;
+        if (curHits > maxContigHits) {
+          maxContigHits = curHits;
+          bestStart = i;
+          bestEnd = j;
+        }
       }
     }
 
-    // Si alguna línea intermedia quedó suelta entre dos líneas del mismo párrafo, la incluimos para que el bloque sea continuo
-    if (matchedLineIndices.length >= 2) {
-      final firstIdx = matchedLineIndices.first;
-      final lastIdx = matchedLineIndices.last;
-      if (lastIdx - firstIdx <= 14) {
-        matchedLineIndices
-          ..clear()
-          ..addAll(List.generate(lastIdx - firstIdx + 1, (k) => firstIdx + k));
+    final List<int> matchedLineIndices = [];
+    if (bestStart != -1 && maxContigHits >= 4) {
+      for (int k = bestStart; k <= bestEnd; k++) {
+        matchedLineIndices.add(k);
+      }
+    } else {
+      // Coincidencia exacta de substring
+      for (int i = 0; i < overlay.lines.length; i++) {
+        final line = overlay.lines[i];
+        if (line.cleanText.isEmpty) continue;
+        if (segJoined.contains(line.cleanText) || line.cleanText.contains(segJoined)) {
+          matchedLineIndices.add(i);
+        }
       }
     }
 
@@ -702,23 +710,6 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     );
   }
 
-  /// Salta el audio a la página `targetPage` (o al párrafo exacto que el usuario tocó sobre la hoja del PDF)
-  void _seekAudioToPdfPage(int targetPage, {int? specificSegIdx}) {
-    if (_totalPdfPages <= 0) return;
-    final info = _resolveChapterAndSegmentsForPdfPage(targetPage);
-    final targetSeg = specificSegIdx ?? info.startSeg;
-
-    setState(() {
-      _activeChapterIndex = info.chapterIndex;
-      _liveAudioChapterIndex = info.chapterIndex;
-      _liveAudioSegmentIndex = targetSeg;
-      _audioSyncedPdfPage = targetPage;
-      _livePosition = Duration.zero;
-    });
-
-    widget.onSeekToPosition?.call(info.chapterIndex, targetSeg);
-  }
-
   /// Si el usuario toca directamente una línea o párrafo sobre la hoja del PDF
   void _onTapPdfPagePosition(
     TapUpDetails details,
@@ -790,37 +781,60 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
         .where((t) => t.length >= 3)
         .toList();
 
+    int bestChIdx = info.chapterIndex;
     int bestSegIdx = info.startSeg;
     int bestScore = -1;
 
-    for (int s = 0; s < segs.length; s++) {
-      final cleanSeg = segs[s]
-          .split(RegExp(r'\s+'))
-          .map(_normalizeToken)
-          .where((w) => w.isNotEmpty)
-          .join(' ');
+    // Buscamos primero en el capítulo estimado y en los capítulos vecinos para máxima exactitud
+    final candidateChIndices = <int>{
+      info.chapterIndex,
+      if (info.chapterIndex > 0) info.chapterIndex - 1,
+      if (info.chapterIndex + 1 < widget.book.chapters.length) info.chapterIndex + 1,
+    };
 
-      if (cleanSeg.contains(tappedLine.cleanText)) {
-        bestSegIdx = s;
-        bestScore = 999;
-        break;
-      }
+    for (final cIdx in candidateChIndices) {
+      final ch = widget.book.chapters[cIdx];
+      final segs = ch.segments;
+      for (int s = 0; s < segs.length; s++) {
+        final cleanSeg = segs[s]
+            .split(RegExp(r'\s+'))
+            .map(_normalizeToken)
+            .where((w) => w.isNotEmpty)
+            .join(' ');
 
-      int hits = 0;
-      for (final tok in tappedTokens) {
-        if (cleanSeg.contains(tok)) hits++;
+        if (cleanSeg.contains(tappedLine.cleanText)) {
+          bestChIdx = cIdx;
+          bestSegIdx = s;
+          bestScore = 999;
+          break;
+        }
+
+        int hits = 0;
+        for (final tok in tappedTokens) {
+          if (cleanSeg.contains(tok)) hits++;
+        }
+        if (cIdx == info.chapterIndex && s >= info.startSeg && s <= info.endSeg) {
+          hits += 1;
+        }
+        if (hits > bestScore) {
+          bestScore = hits;
+          bestChIdx = cIdx;
+          bestSegIdx = s;
+        }
       }
-      // Bonus si el párrafo está dentro del rango estimado de esta página
-      if (s >= info.startSeg && s <= info.endSeg) {
-        hits += 1;
-      }
-      if (hits > bestScore) {
-        bestScore = hits;
-        bestSegIdx = s;
-      }
+      if (bestScore >= 999) break;
     }
 
-    _seekAudioToPdfPage(pageIndex, specificSegIdx: bestSegIdx);
+    setState(() {
+      _activeChapterIndex = bestChIdx;
+      _liveAudioChapterIndex = bestChIdx;
+      _liveAudioSegmentIndex = bestSegIdx;
+      _audioSyncedPdfPage = pageIndex;
+      _livePosition = Duration.zero;
+      _isSynthesizingText = true;
+    });
+
+    widget.onSeekToPosition?.call(bestChIdx, bestSegIdx);
   }
 
   Future<void> _tryAutoLocatePdfOnDevice() async {
@@ -1330,6 +1344,44 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                                     lineNormRects: highlights.activeLineRects,
                                     wordNormRect: highlights.activeWordRect,
                                     isDarkPageTheme: isDarkTheme,
+                                  ),
+                                ),
+                              ),
+                            // Indicador de carga cuando el usuario toca un texto para narrar
+                            if (_isSynthesizingText && pageIdx == _audioSyncedPdfPage)
+                              IgnorePointer(
+                                child: Container(
+                                  color: Colors.black38,
+                                  child: const Center(
+                                    child: Card(
+                                      color: Color(0xFF1E2026),
+                                      elevation: 8,
+                                      child: Padding(
+                                        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                                        child: Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: [
+                                            SizedBox(
+                                              width: 18,
+                                              height: 18,
+                                              child: CircularProgressIndicator(
+                                                strokeWidth: 2.2,
+                                                color: Color(0xFFF5A623),
+                                              ),
+                                            ),
+                                            SizedBox(width: 12),
+                                            Text(
+                                              'Preparando narración...',
+                                              style: TextStyle(
+                                                color: Colors.white,
+                                                fontSize: 13,
+                                                fontWeight: FontWeight.w600,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ),
+                                    ),
                                   ),
                                 ),
                               ),

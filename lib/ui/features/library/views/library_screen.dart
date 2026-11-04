@@ -71,7 +71,9 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
-      _saveBooks(activeBookId: _currentPlayingBook?.id);
+      if (_currentPlayingBook != null) {
+        _repository.saveBookProgressFast(_currentPlayingBook!);
+      }
       if (!globalAudioPlayer.playing) {
         _userRequestedPause = true;
         NativeChannelService.pauseLoFi();
@@ -418,7 +420,7 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
       _currentPlayingBook = book;
       _currentPlayingChapter = chapter;
     });
-    _saveBooks(activeBookId: book.id);
+    _repository.saveBookProgressFast(book);
 
     Navigator.push(
       context,
@@ -431,25 +433,31 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           player: globalAudioPlayer,
           onProgressUpdated: (updatedChapter, segIdx, totalSegs, posMs) {
             final idx = book.chapters.indexWhere((c) => c.id == updatedChapter.id);
+            final bool chapterOrSegChanged =
+                idx != book.lastChapterIndex || segIdx != book.lastSegmentIndex;
             if (idx != -1) {
               book.lastChapterIndex = idx;
               book.lastSegmentIndex = segIdx;
               book.lastPositionMs = posMs;
               book.totalSegmentsInLastChapter = max(1, totalSegs);
             }
-            WidgetsBinding.instance.addPostFrameCallback((_) {
-              if (mounted) {
-                setState(() {
-                  _currentPlayingBook = book;
-                  _currentPlayingChapter = updatedChapter;
-                });
-              }
-              _saveBooks(activeBookId: book.id);
-            });
+            _repository.saveBookProgressFast(book);
+            if (chapterOrSegChanged) {
+              WidgetsBinding.instance.addPostFrameCallback((_) {
+                if (mounted) {
+                  setState(() {
+                    _currentPlayingBook = book;
+                    _currentPlayingChapter = updatedChapter;
+                  });
+                }
+              });
+            }
           },
         ),
       ),
-    );
+    ).then((_) {
+      if (mounted) setState(() {});
+    });
   }
 
   List<BookItem> get _filteredBooks {

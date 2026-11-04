@@ -7,6 +7,7 @@ import 'package:just_audio/just_audio.dart';
 import 'package:just_audio_background/just_audio_background.dart';
 
 import '../../../../core/utils/text_sanitizer.dart';
+import '../../../../data/repositories/library_repository.dart';
 import '../../../../data/services/cover_service.dart';
 import '../../../../data/services/native_channel_service.dart';
 import '../../../../data/services/tts_synthesis_service.dart';
@@ -45,6 +46,9 @@ class PlayerScreen extends StatefulWidget {
 
 class _PlayerScreenState extends State<PlayerScreen>
     with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+  final LibraryRepository _repository = LibraryRepository();
+  final TtsSynthesisService _ttsService = TtsSynthesisService();
+
   late ChapterItem _currentChapter;
   // 0 = Modo Portada (YouTube Premium), 1 = Modo Texto Karaoke Minimalista
   int _viewMode = 0;
@@ -53,10 +57,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   double _ambientVolume = 0.25;
   String _selectedAmbientTrackId = NativeChannelService.currentTrackId;
   String _selectedVoiceKey = 'es-MX-JorgeNeural';
-  String _selectedVoiceName = 'Jorge HD (México 🇲🇽)';
+  String _selectedVoiceName = 'Jorge HD (México 🇲🇽 • Cálido)';
 
   bool _isPlaying = false;
   bool _userRequestedPause = false;
+  bool _isHandlingCompletion = false;
   double? _draggingSliderSec;
   bool _isSynthesizing = false;
   String _statusMessage = '';
@@ -66,10 +71,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   List<String> _segments = [];
   int _currentSegmentIndex = 0;
   int _synthesisGeneration = 0;
+  int _prefetchGeneration = 0;
   int _lastSavedSecond = -1;
 
-  final TtsSynthesisService _ttsService = TtsSynthesisService();
-  final Map<int, GlobalKey> _segmentKeys = {};
+  // Un único GlobalKey para el párrafo activo (evita crear 200 GlobalKeys y elimina el congelamiento ANR)
+  final GlobalKey _activeSegmentKey = GlobalKey();
   int _lastAutoScrolledSegment = -1;
 
   List<Color> _ambientColors = [
@@ -94,7 +100,43 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _loadCoverAmbientPalette();
     _setupAudioStreams();
-    _startChapterPlayback(
+    _initPreferencesAndStartPlayback();
+  }
+
+  Future<void> _initPreferencesAndStartPlayback() async {
+    final prefs = await _repository.loadPlayerPreferences();
+    if (!mounted) return;
+
+    final savedSpeed = (prefs['speed'] as double?) ?? 1.0;
+    final savedVoiceKey = (prefs['voiceKey'] as String?) ?? 'es-MX-JorgeNeural';
+    final savedVoiceName =
+        TtsSynthesisService.voicesMap[savedVoiceKey] ??
+        (prefs['voiceName'] as String?) ??
+        'Jorge HD (México 🇲🇽 • Cálido)';
+    final savedVol = (prefs['ambientVolume'] as double?) ?? 0.25;
+    final savedTrack = prefs['ambientTrackId'] as String?;
+
+    setState(() {
+      _playbackSpeed = savedSpeed.clamp(0.70, 2.00);
+      _selectedVoiceKey = savedVoiceKey;
+      _selectedVoiceName = savedVoiceName;
+      _ambientVolume = savedVol.clamp(0.0, 1.0);
+      if (savedTrack != null && savedTrack.isNotEmpty) {
+        _selectedAmbientTrackId = savedTrack;
+      }
+    });
+
+    if (savedTrack != null && savedTrack.isNotEmpty) {
+      NativeChannelService.selectAndPlayTrack(
+        savedTrack,
+        _ambientVolume,
+        shouldPlayNow: false,
+      );
+    } else {
+      NativeChannelService.setLoFiVolume(_ambientVolume);
+    }
+
+    await _startChapterPlayback(
       _currentChapter,
       startSegment: widget.initialSegmentIndex,
       initialSeekMs: widget.initialPositionMs,
@@ -115,6 +157,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     WidgetsBinding.instance.removeObserver(this);
     _saveExactPositionNow();
     _synthesisGeneration++;
+    _prefetchGeneration++;
     _ambientAnimController.dispose();
     _playerStateSub?.cancel();
     _positionSub?.cancel();
@@ -153,7 +196,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
         return;
       }
-      setState(() => _isPlaying = state.playing);
+      if (_isPlaying != state.playing) {
+        setState(() => _isPlaying = state.playing);
+      }
 
       if (state.playing && !_isSynthesizing && _ambientVolume > 0) {
         NativeChannelService.setLoFiVolume(_ambientVolume);
@@ -162,23 +207,29 @@ class _PlayerScreenState extends State<PlayerScreen>
         NativeChannelService.pauseLoFi();
       }
 
-      if (state.processingState == ProcessingState.completed) {
+      if (state.processingState == ProcessingState.completed && !_isHandlingCompletion) {
         _onSegmentCompleted();
       }
     });
 
     _positionSub = widget.player.positionStream.listen((pos) {
       if (!mounted) return;
-      setState(() => _position = pos);
+      // Solo reconstruir cuando la diferencia supera 120ms para ahorrar CPU en gama baja/media
+      if ((pos.inMilliseconds - _position.inMilliseconds).abs() >= 120 ||
+          pos == Duration.zero) {
+        setState(() => _position = pos);
+      }
       final sec = pos.inSeconds;
-      if (sec != _lastSavedSecond && sec % 2 == 0) {
+      if (sec != _lastSavedSecond && sec % 3 == 0) {
         _lastSavedSecond = sec;
         _saveExactPositionNow();
       }
     });
 
     _durationSub = widget.player.durationStream.listen((dur) {
-      if (mounted && dur != null) setState(() => _duration = dur);
+      if (mounted && dur != null && dur != _duration) {
+        setState(() => _duration = dur);
+      }
     });
   }
 
@@ -188,21 +239,21 @@ class _PlayerScreenState extends State<PlayerScreen>
     int initialSeekMs = 0,
   }) async {
     _userRequestedPause = false;
+    _isHandlingCompletion = false;
     final gen = ++_synthesisGeneration;
     NativeChannelService.pauseLoFi();
     await widget.player.stop();
 
-    final segs = TextSanitizer.splitIntoSegments(chapter.textContent);
-    _segmentKeys.clear();
-    for (int i = 0; i < segs.length; i++) {
-      _segmentKeys[i] = GlobalKey();
-    }
-
+    // Usa los segmentos ya cacheados en memoria en ChapterItem (O(1), 0ms en el hilo UI)
+    final segs = chapter.segments;
     final int safeSeg = startSegment.clamp(0, max<int>(0, segs.length - 1)).toInt();
+
+    if (!mounted) return;
     setState(() {
       _currentChapter = chapter;
       _segments = segs;
       _currentSegmentIndex = safeSeg;
+      _lastAutoScrolledSegment = -1;
       _isSynthesizing = true;
       _statusMessage = 'Preparando voz HD (${_selectedVoiceName.split(' ').first})...';
     });
@@ -217,12 +268,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     _lastAutoScrolledSegment = index;
 
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      final key = _segmentKeys[index];
-      final ctx = key?.currentContext;
+      if (!mounted) return;
+      final ctx = _activeSegmentKey.currentContext;
       if (ctx != null) {
         Scrollable.ensureVisible(
           ctx,
-          duration: const Duration(milliseconds: 420),
+          duration: const Duration(milliseconds: 380),
           curve: Curves.easeOutCubic,
           alignment: 0.25,
         );
@@ -234,6 +285,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (gen != _synthesisGeneration || !mounted) return;
     if (index < 0 || index >= _segments.length) return;
 
+    _isHandlingCompletion = false;
     setState(() {
       _currentSegmentIndex = index;
       _isSynthesizing = true;
@@ -244,101 +296,130 @@ class _PlayerScreenState extends State<PlayerScreen>
     final voiceKey = _selectedVoiceKey;
     final chapter = _currentChapter;
 
-    try {
-      final audioFile = await _ttsService.synthesizeSegment(
-        bookId: widget.book.id,
-        chapter: chapter,
-        segIdx: index,
-        text: _segments[index],
-        voiceKey: voiceKey,
-      );
-
-      if (gen != _synthesisGeneration || !mounted) return;
-
-      Uri? artUri;
-      if (widget.book.coverImagePath != null &&
-          File(widget.book.coverImagePath!).existsSync()) {
-        artUri = Uri.file(widget.book.coverImagePath!);
-      } else if (widget.book.coverUrl != null) {
-        artUri = Uri.parse(widget.book.coverUrl!);
-      }
-
-      await widget.player.setAudioSource(
-        AudioSource.uri(
-          Uri.file(audioFile.path),
-          tag: MediaItem(
-            id: '${widget.book.id}_${chapter.id}_$index',
-            album: widget.book.title,
-            title: '${chapter.title} (${index + 1}/${_segments.length})',
-            artist: widget.book.author,
-            artUri: artUri,
-          ),
-        ),
-      );
-
-      if (seekToMs > 500) {
-        await widget.player.seek(Duration(milliseconds: seekToMs));
-      }
-
-      await widget.player.setSpeed(_playbackSpeed);
+    // Bucle de reconexión automática: si vas viajando y se corta el 4G/LTE, NO salta de párrafo
+    // ni queda colgado para siempre; espera y reintenta automáticamente hasta que vuelve la señal.
+    int networkAttempt = 0;
+    while (mounted && gen == _synthesisGeneration && !_userRequestedPause) {
       try {
-        await widget.player.setPitch(1.0);
-      } catch (_) {}
+        final audioFile = await _ttsService.synthesizeSegment(
+          bookId: widget.book.id,
+          chapter: chapter,
+          segIdx: index,
+          text: _segments[index],
+          voiceKey: voiceKey,
+        );
 
-      setState(() {
-        _isSynthesizing = false;
-        _statusMessage = '';
-      });
+        if (gen != _synthesisGeneration || !mounted || _userRequestedPause) return;
 
-      if (_userRequestedPause || gen != _synthesisGeneration || !mounted) {
+        Uri? artUri;
+        if (widget.book.coverImagePath != null &&
+            await File(widget.book.coverImagePath!).exists()) {
+          artUri = Uri.file(widget.book.coverImagePath!);
+        } else if (widget.book.coverUrl != null) {
+          artUri = Uri.parse(widget.book.coverUrl!);
+        }
+
+        await widget.player.setAudioSource(
+          AudioSource.uri(
+            Uri.file(audioFile.path),
+            tag: MediaItem(
+              id: '${widget.book.id}_${chapter.id}_$index',
+              album: widget.book.title,
+              title: '${chapter.title} (${index + 1}/${_segments.length})',
+              artist: widget.book.author,
+              artUri: artUri,
+            ),
+          ),
+        );
+
+        if (seekToMs > 500) {
+          await widget.player.seek(Duration(milliseconds: seekToMs));
+        }
+
+        await widget.player.setSpeed(_playbackSpeed);
+        try {
+          await widget.player.setPitch(1.0);
+        } catch (_) {}
+
+        if (!mounted || gen != _synthesisGeneration) return;
+        setState(() {
+          _isSynthesizing = false;
+          _statusMessage = '';
+        });
+
+        if (_userRequestedPause) return;
+
+        await widget.player.play();
+        if (_ambientVolume > 0 && !_userRequestedPause) {
+          NativeChannelService.setLoFiVolume(_ambientVolume);
+          NativeChannelService.playLoFi();
+        }
+
+        // Iniciar pre-descarga inteligente en caché estilo YouTube Music
+        _startSequentialPrefetch(chapter, index + 1, voiceKey, gen);
         return;
-      }
+      } catch (e) {
+        networkAttempt++;
+        if (!mounted || gen != _synthesisGeneration || _userRequestedPause) return;
 
-      await widget.player.play();
-      if (_ambientVolume > 0 && !_userRequestedPause) {
-        NativeChannelService.setLoFiVolume(_ambientVolume);
-        NativeChannelService.playLoFi();
-      }
+        setState(() {
+          _isSynthesizing = true;
+          _statusMessage =
+              'Señal inestable • Reconectando automáticamente (intento $networkAttempt)...';
+        });
 
-      _prefetchNextSegments(chapter, index + 1, voiceKey, gen);
-    } catch (e) {
-      if (!mounted || gen != _synthesisGeneration) return;
-      if (index + 1 < _segments.length && !_userRequestedPause) {
-        _playSegmentAtIndex(index + 1, gen);
-        return;
+        // Espera progresiva corta (2.5s) antes de volver a probar si regresó el LTE
+        await Future<void>.delayed(const Duration(milliseconds: 2500));
       }
-      setState(() {
-        _isSynthesizing = false;
-        _statusMessage = '';
-      });
     }
   }
 
-  Future<void> _prefetchNextSegments(
+  /// Pre-descarga secuencial en segundo plano estilo YouTube Music:
+  /// Va guardando en caché los próximos 12 párrafos y, cuando se acerca el final del capítulo,
+  /// ya deja descargados los primeros 4 párrafos del capítulo siguiente para que la transición sea instantánea.
+  Future<void> _startSequentialPrefetch(
     ChapterItem chapter,
     int startIdx,
     String voiceKey,
     int gen,
   ) async {
-    for (int i = startIdx; i < min(_segments.length, startIdx + 8); i++) {
-      if (gen != _synthesisGeneration || !mounted || _userRequestedPause) return;
+    final prefetchId = ++_prefetchGeneration;
+    final segs = chapter.segments;
+
+    for (int i = startIdx; i < min(segs.length, startIdx + 12); i++) {
+      if (gen != _synthesisGeneration ||
+          prefetchId != _prefetchGeneration ||
+          !mounted ||
+          _userRequestedPause) {
+        return;
+      }
       try {
         await _ttsService.synthesizeSegment(
           bookId: widget.book.id,
           chapter: chapter,
           segIdx: i,
-          text: _segments[i],
+          text: segs[i],
           voiceKey: voiceKey,
         );
-      } catch (_) {}
+      } catch (_) {
+        // Si la red está débil, pausar el pre-fetch un momento para no competir con el audio principal
+        await Future<void>.delayed(const Duration(seconds: 2));
+      }
     }
-    if (startIdx + 3 >= _segments.length) {
+
+    // Cuando faltan 6 párrafos o menos para terminar el capítulo, pre-cachear el inicio del próximo capítulo
+    if (startIdx + 6 >= segs.length) {
       final chIdx = widget.book.chapters.indexWhere((c) => c.id == chapter.id);
       if (chIdx != -1 && chIdx + 1 < widget.book.chapters.length) {
         final nextCh = widget.book.chapters[chIdx + 1];
-        final nextSegs = TextSanitizer.splitIntoSegments(nextCh.textContent);
-        for (int k = 0; k < min(2, nextSegs.length); k++) {
-          if (gen != _synthesisGeneration || !mounted || _userRequestedPause) return;
+        final nextSegs = nextCh.segments;
+        for (int k = 0; k < min(4, nextSegs.length); k++) {
+          if (gen != _synthesisGeneration ||
+              prefetchId != _prefetchGeneration ||
+              !mounted ||
+              _userRequestedPause) {
+            return;
+          }
           try {
             await _ttsService.synthesizeSegment(
               bookId: widget.book.id,
@@ -354,7 +435,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _onSegmentCompleted() {
-    if (_isSynthesizing) return;
+    if (_isSynthesizing || _isHandlingCompletion || _userRequestedPause) return;
+    _isHandlingCompletion = true;
+
     if (_currentSegmentIndex + 1 < _segments.length) {
       _playSegmentAtIndex(_currentSegmentIndex + 1, _synthesisGeneration);
     } else {
@@ -362,6 +445,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (idx != -1 && idx + 1 < widget.book.chapters.length) {
         _startChapterPlayback(widget.book.chapters[idx + 1], startSegment: 0);
       } else {
+        _isHandlingCompletion = false;
         NativeChannelService.pauseLoFi();
       }
     }
@@ -396,7 +480,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (targetSeconds <= acc + chSec || ch == widget.book.chapters.last) {
         final localSec = (targetSeconds - acc).clamp(0.0, chSec.toDouble());
         final localRatio = (localSec / max(1, chSec)).clamp(0.0, 0.999);
-        final segs = TextSanitizer.splitIntoSegments(ch.textContent);
+        final segs = ch.segments;
         final targetSeg = (localRatio * segs.length).floor();
         if (ch.id == _currentChapter.id) {
           _playSegmentAtIndex(targetSeg, _synthesisGeneration);
@@ -485,6 +569,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     try {
       widget.player.setPitch(1.0);
     } catch (_) {}
+    _repository.savePlayerPreferences(speed: _playbackSpeed);
   }
 
   void _showSpeedModal() {
@@ -558,7 +643,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                     const Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'Ajustá el ritmo manteniendo el tono natural de la voz sin distorsión',
+                        'Se guarda automáticamente para todos tus capítulos y libros',
                         style: TextStyle(color: Colors.white54, fontSize: 12.5),
                       ),
                     ),
@@ -668,6 +753,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_isSynthesizing) {
       _userRequestedPause = true;
       _synthesisGeneration++;
+      _prefetchGeneration++;
       NativeChannelService.pauseLoFi();
       widget.player.pause();
       setState(() {
@@ -689,10 +775,18 @@ class _PlayerScreenState extends State<PlayerScreen>
       _saveExactPositionNow();
     } else {
       _userRequestedPause = false;
-      widget.player.play();
-      if (_ambientVolume > 0) {
-        NativeChannelService.setLoFiVolume(_ambientVolume);
-        NativeChannelService.playLoFi();
+      if (widget.player.audioSource == null) {
+        _playSegmentAtIndex(
+          _currentSegmentIndex,
+          ++_synthesisGeneration,
+          seekToMs: _position.inMilliseconds,
+        );
+      } else {
+        widget.player.play();
+        if (_ambientVolume > 0) {
+          NativeChannelService.setLoFiVolume(_ambientVolume);
+          NativeChannelService.playLoFi();
+        }
       }
     }
   }
@@ -749,6 +843,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                             final newVol = enabled ? 0.25 : 0.0;
                             setModalState(() {});
                             setState(() => _ambientVolume = newVol);
+                            _repository.savePlayerPreferences(ambientVolume: newVol);
                             if (newVol > 0 && _isPlaying) {
                               NativeChannelService.selectAndPlayTrack(
                                 _selectedAmbientTrackId,
@@ -795,6 +890,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                                   onChanged: (val) {
                                     setModalState(() {});
                                     setState(() => _ambientVolume = val);
+                                    _repository.savePlayerPreferences(ambientVolume: val);
                                     NativeChannelService.setLoFiVolume(val);
                                     if (val > 0 && _isPlaying) {
                                       NativeChannelService.playLoFi();
@@ -848,6 +944,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                               _selectedAmbientTrackId = track.id;
                               _ambientVolume = vol;
                             });
+                            _repository.savePlayerPreferences(
+                              ambientTrackId: track.id,
+                              ambientVolume: vol,
+                            );
                             NativeChannelService.selectAndPlayTrack(
                               track.id,
                               vol,
@@ -936,6 +1036,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       onTap: () {
         setModalState(() {});
         setState(() => _ambientVolume = val);
+        _repository.savePlayerPreferences(ambientVolume: val);
         NativeChannelService.setLoFiVolume(val);
         if (val > 0 && _isPlaying) {
           NativeChannelService.playLoFi();
@@ -994,7 +1095,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               ),
               const SizedBox(height: 4),
               const Text(
-                'Entonación humana con pausas respiratorias naturales en español',
+                'Se guarda automáticamente tu voz elegida para todos tus libros',
                 style: TextStyle(color: Colors.white54, fontSize: 12.5),
               ),
               const SizedBox(height: 12),
@@ -1030,6 +1131,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                             _selectedVoiceKey = entry.key;
                             _selectedVoiceName = entry.value;
                           });
+                          _repository.savePlayerPreferences(
+                            voiceKey: entry.key,
+                            voiceName: entry.value,
+                          );
                           Navigator.pop(context);
                           _startChapterPlayback(
                             _currentChapter,
@@ -1449,7 +1554,6 @@ class _PlayerScreenState extends State<PlayerScreen>
 
           if (!isCurrentSeg) {
             return GestureDetector(
-              key: _segmentKeys[idx],
               onTap: () => _playSegmentAtIndex(idx, _synthesisGeneration),
               child: Padding(
                 padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
@@ -1473,10 +1577,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           final int activeWordIdx = _getActiveWordIndexForCurrentSegment(tokens);
 
           return GestureDetector(
-            key: _segmentKeys[idx],
+            key: _activeSegmentKey,
             onTap: () => _playSegmentAtIndex(idx, _synthesisGeneration),
-            child: AnimatedContainer(
-              duration: const Duration(milliseconds: 220),
+            child: Container(
               margin: const EdgeInsets.symmetric(vertical: 10),
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 18),
               decoration: BoxDecoration(
@@ -1494,32 +1597,64 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                 ],
               ),
-              child: RichText(
-                text: TextSpan(
-                  style: TextStyle(
-                    fontFamily: GoogleFonts.inter().fontFamily,
-                    fontSize: 18.5,
-                    height: 1.65,
-                  ),
-                  children: List.generate(tokens.length, (wIdx) {
-                    final bool isCurrentWord = wIdx == activeWordIdx;
-                    final bool isPastWord = wIdx < activeWordIdx;
-                    return TextSpan(
-                      text: '${tokens[wIdx]}${wIdx < tokens.length - 1 ? ' ' : ''}',
-                      style: TextStyle(
-                        color: isCurrentWord
-                            ? Colors.black
-                            : (isPastWord
-                                ? Colors.white.withValues(alpha: 0.95)
-                                : Colors.white.withValues(alpha: 0.78)),
-                        fontWeight: isCurrentWord ? FontWeight.w800 : FontWeight.w500,
-                        backgroundColor: isCurrentWord
-                            ? const Color(0xFFF5A623)
-                            : Colors.transparent,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  if (_statusMessage.isNotEmpty)
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 8),
+                      child: Row(
+                        children: [
+                          const SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Color(0xFFF5A623),
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Expanded(
+                            child: Text(
+                              _statusMessage,
+                              style: const TextStyle(
+                                color: Color(0xFFF5A623),
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                    );
-                  }),
-                ),
+                    ),
+                  RichText(
+                    text: TextSpan(
+                      style: TextStyle(
+                        fontFamily: GoogleFonts.inter().fontFamily,
+                        fontSize: 18.5,
+                        height: 1.65,
+                      ),
+                      children: List.generate(tokens.length, (wIdx) {
+                        final bool isCurrentWord = wIdx == activeWordIdx;
+                        final bool isPastWord = wIdx < activeWordIdx;
+                        return TextSpan(
+                          text: '${tokens[wIdx]}${wIdx < tokens.length - 1 ? ' ' : ''}',
+                          style: TextStyle(
+                            color: isCurrentWord
+                                ? Colors.black
+                                : (isPastWord
+                                    ? Colors.white.withValues(alpha: 0.95)
+                                    : Colors.white.withValues(alpha: 0.78)),
+                            fontWeight: isCurrentWord ? FontWeight.w800 : FontWeight.w500,
+                            backgroundColor: isCurrentWord
+                                ? const Color(0xFFF5A623)
+                                : Colors.transparent,
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                ],
               ),
             ),
           );
@@ -1839,73 +1974,82 @@ class _PlayerScreenState extends State<PlayerScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: const Color(0xFF0D0E11),
-      body: AnimatedBuilder(
-        animation: _ambientAnimController,
-        builder: (context, child) {
-          final double t = _ambientAnimController.value;
-          final Color c1 = _ambientColors.first;
-          final Color c2 = _ambientColors.last;
+      body: Stack(
+        children: [
+          // La animación de fondo queda aislada en su propio RepaintBoundary y NO reconstruye el texto ni los controles
+          Positioned.fill(
+            child: RepaintBoundary(
+              child: AnimatedBuilder(
+                animation: _ambientAnimController,
+                builder: (context, _) {
+                  final double t = _ambientAnimController.value;
+                  final Color c1 = _ambientColors.first;
+                  final Color c2 = _ambientColors.last;
 
-          final List<Color> bgGradient = _viewMode == 0
-              ? [c1, c2, const Color(0xFF0D0E11)]
-              : [
-                  const Color(0xFF141311),
-                  const Color(0xFF0E0E0F),
-                  const Color(0xFF09090A),
-                ];
+                  final List<Color> bgGradient = _viewMode == 0
+                      ? [c1, c2, const Color(0xFF0D0E11)]
+                      : const [
+                          Color(0xFF141311),
+                          Color(0xFF0E0E0F),
+                          Color(0xFF09090A),
+                        ];
 
-          return Stack(
-            children: [
-              Positioned.fill(
-                child: Container(
-                  decoration: BoxDecoration(
-                    gradient: LinearGradient(
-                      begin: Alignment(-0.8 + t * 1.2, -1.0),
-                      end: Alignment(0.8 - t * 1.2, 1.0),
-                      colors: bgGradient,
-                      stops: const [0.0, 0.52, 1.0],
-                    ),
-                  ),
-                ),
-              ),
-              if (_viewMode == 0)
-                Positioned(
-                  top: 60 + (t * 45),
-                  left: 30 + ((1 - t) * 50),
-                  right: 30 + (t * 50),
-                  child: IgnorePointer(
-                    child: Container(
-                      height: 280,
-                      decoration: BoxDecoration(
-                        shape: BoxShape.circle,
-                        boxShadow: [
-                          BoxShadow(
-                            color: c1.withValues(alpha: 0.55),
-                            blurRadius: 110,
-                            spreadRadius: 35,
+                  return Stack(
+                    children: [
+                      Positioned.fill(
+                        child: Container(
+                          decoration: BoxDecoration(
+                            gradient: LinearGradient(
+                              begin: Alignment(-0.8 + t * 1.2, -1.0),
+                              end: Alignment(0.8 - t * 1.2, 1.0),
+                              colors: bgGradient,
+                              stops: const [0.0, 0.52, 1.0],
+                            ),
                           ),
-                        ],
+                        ),
                       ),
-                    ),
-                  ),
-                ),
-              Column(
-                children: [
-                  _buildTopBar(),
-                  Expanded(
-                    child: AnimatedSwitcher(
-                      duration: const Duration(milliseconds: 280),
-                      child: _viewMode == 0
-                          ? _buildCoverModeView()
-                          : _buildKaraokeTextView(),
-                    ),
-                  ),
-                  _buildUnifiedBottomControls(),
-                ],
+                      if (_viewMode == 0)
+                        Positioned(
+                          top: 60 + (t * 45),
+                          left: 30 + ((1 - t) * 50),
+                          right: 30 + (t * 50),
+                          child: IgnorePointer(
+                            child: Container(
+                              height: 280,
+                              decoration: BoxDecoration(
+                                shape: BoxShape.circle,
+                                boxShadow: [
+                                  BoxShadow(
+                                    color: c1.withValues(alpha: 0.55),
+                                    blurRadius: 110,
+                                    spreadRadius: 35,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                  );
+                },
               ),
+            ),
+          ),
+          Column(
+            children: [
+              _buildTopBar(),
+              Expanded(
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 280),
+                  child: _viewMode == 0
+                      ? _buildCoverModeView()
+                      : _buildKaraokeTextView(),
+                ),
+              ),
+              _buildUnifiedBottomControls(),
             ],
-          );
-        },
+          ),
+        ],
       ),
     );
   }

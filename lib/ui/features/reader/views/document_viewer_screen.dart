@@ -110,7 +110,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       widget.totalSegmentsInChapter ??
           (widget.book.totalSegmentsInLastChapter > 0
               ? widget.book.totalSegmentsInLastChapter
-              : TextSanitizer.splitIntoSegments(ch.textContent).length),
+              : ch.segments.length),
     );
     final segRatio = (segIdx / max(1, totalSegs - 1)).clamp(0.0, 1.0);
 
@@ -139,7 +139,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       if (range != null && targetPage >= range[0] && targetPage <= range[1]) {
         final pageSpan = max(1, range[1] - range[0] + 1);
         final pageOffsetRatio = ((targetPage - range[0]) / pageSpan).clamp(0.0, 0.95);
-        final segs = TextSanitizer.splitIntoSegments(ch.textContent);
+        final segs = ch.segments;
         final targetSeg =
             (pageOffsetRatio * segs.length).floor().clamp(0, max<int>(0, segs.length - 1));
 
@@ -310,7 +310,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     }
     final chIdx = widget.book.lastChapterIndex.clamp(0, widget.book.chapters.length - 1);
     final ch = widget.book.chapters[chIdx];
-    final segs = TextSanitizer.splitIntoSegments(ch.textContent);
+    final segs = ch.segments;
     if (segs.isEmpty) return ch.title;
     final sIdx = (widget.activeSegmentIndex ?? widget.book.lastSegmentIndex)
         .clamp(0, segs.length - 1);
@@ -688,7 +688,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
   }
 
   Widget _buildTextReader(ChapterItem chapter) {
-    final segments = TextSanitizer.splitIntoSegments(chapter.textContent);
+    final segments = chapter.segments;
     final isSameChapterAsAudio = widget.book.lastChapterIndex == _activeChapterIndex;
     final activeSeg = widget.activeSegmentIndex ?? widget.book.lastSegmentIndex;
 

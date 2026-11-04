@@ -19,6 +19,8 @@ class BookItem {
   int totalSegmentsInLastChapter;
   bool isFavorite;
 
+  int? _cachedBookTotalSeconds;
+
   BookItem({
     required this.id,
     required this.title,
@@ -38,7 +40,9 @@ class BookItem {
   });
 
   int get estimatedBookTotalSeconds {
-    return chapters.fold<int>(0, (sum, ch) => sum + ch.estimatedTotalSeconds);
+    _cachedBookTotalSeconds ??=
+        chapters.fold<int>(0, (sum, ch) => sum + ch.estimatedTotalSeconds);
+    return _cachedBookTotalSeconds!;
   }
 
   double get overallProgress {

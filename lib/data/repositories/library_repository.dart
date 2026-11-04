@@ -8,60 +8,98 @@ import '../../domain/models/book_item.dart';
 import '../../domain/models/chapter_item.dart';
 import '../services/cover_service.dart';
 
-/// Repositorio único de verdad para la Biblioteca de libros y sus archivos en disco
+/// Repositorio único de verdad para la Biblioteca, progreso ultraligero y preferencias del reproductor
 class LibraryRepository {
   static const String _booksPrefsKey = 'audiomind_books';
   static const String _lastBookIdPrefsKey = 'audiomind_last_book_id';
+  static const String _sanitizedVersionPrefsKey = 'audiomind_sanitized_version';
+  static const int _currentSanitizerVersion = 3;
+
+  // Claves de preferencias persistentes del reproductor (Velocidad, Voz, Música de fondo)
+  static const String _prefSpeedKey = 'audiomind_pref_speed';
+  static const String _prefVoiceKey = 'audiomind_pref_voice_key';
+  static const String _prefVoiceName = 'audiomind_pref_voice_name';
+  static const String _prefAmbientVol = 'audiomind_pref_ambient_vol';
+  static const String _prefAmbientTrack = 'audiomind_pref_ambient_track';
+
+  static String _fastProgressKey(String bookId) => 'audiomind_prog_$bookId';
 
   Future<List<BookItem>> loadBooks() async {
     final prefs = await SharedPreferences.getInstance();
     final jsonList = prefs.getStringList(_booksPrefsKey);
+    final savedSanitizerVer = prefs.getInt(_sanitizedVersionPrefsKey) ?? 0;
 
     if (jsonList != null && jsonList.isNotEmpty) {
       final loaded = jsonList
           .map((item) => BookItem.fromJson(jsonDecode(item) as Map<String, dynamic>))
           .toList();
 
-      // Limpiar y armonizar también los libros que ya estaban cargados en la biblioteca
-      final List<BookItem> sanitizedBooks = [];
+      final bool needsOneTimeSanitize = savedSanitizerVer < _currentSanitizerVersion;
+      final List<BookItem> resultBooks = [];
+
       for (final b in loaded) {
         if (b.id == 'oakley_numeros' && (b.coverUrl == null || b.coverUrl!.isEmpty)) {
           b.coverUrl = sampleOakleyBook.coverUrl;
         }
-        final cleanChapters = b.chapters.map((ch) {
-          return ChapterItem(
-            id: ch.id,
-            title: TextSanitizer.sanitizeExtractedText(ch.title),
-            subtitle: ch.subtitle,
-            durationText: ch.durationText,
-            textContent: TextSanitizer.sanitizeExtractedText(ch.textContent),
-          );
-        }).toList();
 
-        sanitizedBooks.add(
-          BookItem(
-            id: b.id,
-            title: b.title,
-            author: b.author,
-            coverTag: b.coverTag,
-            totalTime: b.totalTime,
-            chapters: cleanChapters,
-            isFavorite: b.isFavorite,
-            coverImagePath: b.coverImagePath,
-            coverUrl: b.coverUrl,
-            originalFilePath: b.originalFilePath,
-            fileType: b.fileType,
-            lastChapterIndex: b.lastChapterIndex,
-            lastSegmentIndex: b.lastSegmentIndex,
-            lastPositionMs: b.lastPositionMs,
-            totalSegmentsInLastChapter: b.totalSegmentsInLastChapter,
-          ),
-        );
+        // Restaurar progreso rápido ultraligero si existe
+        final rawFastProg = prefs.getString(_fastProgressKey(b.id));
+        if (rawFastProg != null) {
+          try {
+            final map = jsonDecode(rawFastProg) as Map<String, dynamic>;
+            b.lastChapterIndex = (map['ch'] as int?) ?? b.lastChapterIndex;
+            b.lastSegmentIndex = (map['seg'] as int?) ?? b.lastSegmentIndex;
+            b.lastPositionMs = (map['pos'] as int?) ?? b.lastPositionMs;
+            b.totalSegmentsInLastChapter =
+                (map['tot'] as int?) ?? b.totalSegmentsInLastChapter;
+          } catch (_) {}
+        }
+
+        if (needsOneTimeSanitize) {
+          final cleanChapters = b.chapters.map((ch) {
+            return ChapterItem(
+              id: ch.id,
+              title: TextSanitizer.sanitizeExtractedText(ch.title),
+              subtitle: ch.subtitle,
+              durationText: ch.durationText,
+              textContent: TextSanitizer.sanitizeExtractedText(ch.textContent),
+            );
+          }).toList();
+
+          resultBooks.add(
+            BookItem(
+              id: b.id,
+              title: b.title,
+              author: b.author,
+              coverTag: b.coverTag,
+              totalTime: b.totalTime,
+              chapters: cleanChapters,
+              isFavorite: b.isFavorite,
+              coverImagePath: b.coverImagePath,
+              coverUrl: b.coverUrl,
+              originalFilePath: b.originalFilePath,
+              fileType: b.fileType,
+              lastChapterIndex: b.lastChapterIndex,
+              lastSegmentIndex: b.lastSegmentIndex,
+              lastPositionMs: b.lastPositionMs,
+              totalSegmentsInLastChapter: b.totalSegmentsInLastChapter,
+            ),
+          );
+        } else {
+          resultBooks.add(b);
+        }
       }
-      return sanitizedBooks;
+
+      if (needsOneTimeSanitize) {
+        await saveBooks(resultBooks);
+        await prefs.setInt(_sanitizedVersionPrefsKey, _currentSanitizerVersion);
+      }
+
+      return resultBooks;
     } else {
       final initial = [sampleOakleyBook];
       await saveBooks(initial);
+      await prefs.setInt(_sanitizedVersionPrefsKey, _currentSanitizerVersion);
       return initial;
     }
   }
@@ -71,6 +109,7 @@ class LibraryRepository {
     return prefs.getString(_lastBookIdPrefsKey);
   }
 
+  /// Guardado completo de estructura de libros (solo al agregar, borrar o marcar favorito)
   Future<void> saveBooks(List<BookItem> books, {String? activeBookId}) async {
     final prefs = await SharedPreferences.getInstance();
     final encoded = books.map((b) => jsonEncode(b.toJson())).toList();
@@ -78,6 +117,48 @@ class LibraryRepository {
     if (activeBookId != null) {
       await prefs.setString(_lastBookIdPrefsKey, activeBookId);
     }
+  }
+
+  /// Guardado ultraligero (< 0.2ms) para progreso de audio cada 2 segundos o al cambiar de capítulo.
+  /// Evita serializar megabytes de texto en el hilo principal y elimina el ANR "AudioMind isn't responding".
+  Future<void> saveBookProgressFast(BookItem book) async {
+    final prefs = await SharedPreferences.getInstance();
+    final payload = jsonEncode({
+      'ch': book.lastChapterIndex,
+      'seg': book.lastSegmentIndex,
+      'pos': book.lastPositionMs,
+      'tot': book.totalSegmentsInLastChapter,
+    });
+    await prefs.setString(_fastProgressKey(book.id), payload);
+    await prefs.setString(_lastBookIdPrefsKey, book.id);
+  }
+
+  /// Carga la velocidad, voz y configuración de música ambiental guardadas por el usuario
+  Future<Map<String, dynamic>> loadPlayerPreferences() async {
+    final prefs = await SharedPreferences.getInstance();
+    return {
+      'speed': prefs.getDouble(_prefSpeedKey) ?? 1.0,
+      'voiceKey': prefs.getString(_prefVoiceKey) ?? 'es-MX-JorgeNeural',
+      'voiceName': prefs.getString(_prefVoiceName) ?? 'Jorge HD (México 🇲🇽 • Cálido)',
+      'ambientVolume': prefs.getDouble(_prefAmbientVol) ?? 0.25,
+      'ambientTrackId': prefs.getString(_prefAmbientTrack),
+    };
+  }
+
+  /// Guarda al instante la velocidad, voz o volumen ambiental elegidos por el usuario
+  Future<void> savePlayerPreferences({
+    double? speed,
+    String? voiceKey,
+    String? voiceName,
+    double? ambientVolume,
+    String? ambientTrackId,
+  }) async {
+    final prefs = await SharedPreferences.getInstance();
+    if (speed != null) await prefs.setDouble(_prefSpeedKey, speed);
+    if (voiceKey != null) await prefs.setString(_prefVoiceKey, voiceKey);
+    if (voiceName != null) await prefs.setString(_prefVoiceName, voiceName);
+    if (ambientVolume != null) await prefs.setDouble(_prefAmbientVol, ambientVolume);
+    if (ambientTrackId != null) await prefs.setString(_prefAmbientTrack, ambientTrackId);
   }
 
   Future<String> savePermanentBookCopy(String bookId, String fileName, Uint8List bytes) async {
@@ -91,43 +172,12 @@ class LibraryRepository {
     return permanentFilePath;
   }
 
-  Future<bool> resolveMissingCovers(List<BookItem> books) async {
-    bool updated = false;
-    final docDir = await getApplicationDocumentsDirectory();
-
-    for (final book in books) {
-      final hasLocal = book.coverImagePath != null && File(book.coverImagePath!).existsSync();
-      if (!hasLocal) {
-        String? url = book.coverUrl;
-        url ??= await CoverService.fetchOnlineCoverUrl(book.title);
-        if (url != null && url.isNotEmpty) {
-          book.coverUrl = url;
-          try {
-            final coverFile = File('${docDir.path}/cover_${book.id}.jpg');
-            final client = HttpClient();
-            final req = await client.getUrl(Uri.parse(url));
-            final res = await req.close().timeout(const Duration(seconds: 5));
-            if (res.statusCode == 200) {
-              final bytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
-              if (bytes.length > 1000) {
-                await coverFile.writeAsBytes(bytes);
-                book.coverImagePath = coverFile.path;
-              }
-            }
-          } catch (_) {}
-          updated = true;
-        }
-      }
-    }
-    if (updated) {
-      await saveBooks(books);
-    }
-    return updated;
-  }
-
   /// Borra todos los archivos asociados a un libro (portada, documento original, MP3s y JSONs de karaoke)
   Future<void> deleteBookFiles(BookItem book) async {
     try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.remove(_fastProgressKey(book.id));
+
       if (book.coverImagePath != null) {
         final f = File(book.coverImagePath!);
         if (await f.exists()) await f.delete();
@@ -137,23 +187,15 @@ class LibraryRepository {
         if (await f.exists()) await f.delete();
       }
       final docDir = await getApplicationDocumentsDirectory();
-      // Limpiar MP3s y words.json sintetizados en docDir
-      if (await docDir.exists()) {
-        final list = docDir.listSync();
-        for (final entity in list) {
-          if (entity is File && entity.path.contains('${book.id}_')) {
-            try {
-              await entity.delete();
-            } catch (_) {}
-          }
-        }
+      // Limpiar carpeta dedicada del libro en tts_cache/<bookId>
+      final bookCacheDir = Directory('${docDir.path}/tts_cache/${book.id}');
+      if (await bookCacheDir.exists()) {
+        await bookCacheDir.delete(recursive: true);
       }
-      // Limpiar carpeta tts_cache si existe
-      final cacheDir = Directory('${docDir.path}/tts_cache');
-      if (await cacheDir.exists()) {
-        final list = cacheDir.listSync();
-        for (final entity in list) {
-          if (entity is File && entity.path.contains(book.id)) {
+      // Limpiar archivos antiguos sueltos en docDir o tts_cache
+      if (await docDir.exists()) {
+        await for (final entity in docDir.list()) {
+          if (entity is File && entity.path.contains('${book.id}_')) {
             try {
               await entity.delete();
             } catch (_) {}

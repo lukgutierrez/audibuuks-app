@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:collection';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
@@ -8,11 +10,16 @@ import '../../core/utils/text_sanitizer.dart';
 import '../../domain/models/chapter_item.dart';
 import '../../domain/models/word_timing_item.dart';
 
-/// Servicio dedicado a la síntesis neuronal Edge-TTS y caché de audio/palabras en disco
+/// Servicio dedicado a la síntesis neuronal Edge-TTS y caché inteligente estilo YouTube Music.
+/// Incluye timeouts estrictos para redes móviles (LTE/4G) inestables, reintentos automáticos
+/// y memoria RAM acotada (LRU) para rendimiento fluido en celulares de gama baja y media.
 class TtsSynthesisService {
-  final Map<String, List<WordTimingItem>> _segmentWordTimings = {};
+  // Mapa LRU acotado a máximo 80 segmentos en RAM para no saturar celulares de gama baja/media
+  final LinkedHashMap<String, List<WordTimingItem>> _segmentWordTimings =
+      LinkedHashMap<String, List<WordTimingItem>>();
   final Map<String, Future<File>> _inFlightSynthesis = {};
   static bool _oldCachePurged = false;
+  static String? _cachedDocDirPath;
 
   static const Map<String, String> voicesMap = {
     'es-MX-JorgeNeural': 'Jorge HD (México 🇲🇽 • Cálido)',
@@ -25,20 +32,34 @@ class TtsSynthesisService {
     'es-MX-DaliaNeural': 'Dalia HD (México 🇲🇽 • Clara)',
   };
 
-  /// Versión v3 invalida automáticamente cualquier audio viejo que tuviera el bug de "$1"
+  Future<String> _getDocDirPath() async {
+    if (_cachedDocDirPath != null) return _cachedDocDirPath!;
+    final dir = await getApplicationDocumentsDirectory();
+    _cachedDocDirPath = dir.path;
+    return _cachedDocDirPath!;
+  }
+
   String segmentKeyId(String bookId, ChapterItem chapter, int segIdx, String voiceKey) {
     return '${bookId}_ch${chapter.id}_s${segIdx}_${voiceKey}_hd96_v3';
   }
 
-  /// Limpia en segundo plano los audios cacheados de versiones anteriores (_hd96)
+  void _putTimingsInRamCache(String key, List<WordTimingItem> timings) {
+    _segmentWordTimings.remove(key);
+    _segmentWordTimings[key] = timings;
+    while (_segmentWordTimings.length > 80) {
+      _segmentWordTimings.remove(_segmentWordTimings.keys.first);
+    }
+  }
+
+  /// Limpia de forma asíncrona (sin bloquear el hilo UI) los audios viejos (_hd96)
   Future<void> purgeLegacyCacheIfNeeded() async {
     if (_oldCachePurged) return;
     _oldCachePurged = true;
     try {
-      final docDir = await getApplicationDocumentsDirectory();
+      final docPath = await _getDocDirPath();
+      final docDir = Directory(docPath);
       if (!await docDir.exists()) return;
-      final entities = docDir.listSync();
-      for (final entity in entities) {
+      await for (final entity in docDir.list()) {
         if (entity is File &&
             (entity.path.endsWith('_hd96.mp3') || entity.path.endsWith('_hd96.words.json'))) {
           try {
@@ -59,14 +80,42 @@ class TtsSynthesisService {
     return _segmentWordTimings[key];
   }
 
-  Future<File> _getSegmentFile(String key) async {
-    final docDir = await getApplicationDocumentsDirectory();
-    return File('${docDir.path}/$key.mp3');
+  Future<Directory> _getBookCacheDir(String bookId) async {
+    final docPath = await _getDocDirPath();
+    final dir = Directory('$docPath/tts_cache/$bookId');
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
   }
 
-  Future<File> _getSegmentWordsFile(String key) async {
-    final docDir = await getApplicationDocumentsDirectory();
-    return File('${docDir.path}/$key.words.json');
+  Future<File> _getSegmentFile(String bookId, String key) async {
+    final docPath = await _getDocDirPath();
+    // Compatibilidad con segmentos ya guardados en docDir raíz y nueva carpeta organizada por libro
+    final legacyFile = File('$docPath/$key.mp3');
+    if (await legacyFile.exists()) return legacyFile;
+    final bookDir = await _getBookCacheDir(bookId);
+    return File('${bookDir.path}/$key.mp3');
+  }
+
+  Future<File> _getSegmentWordsFile(String bookId, String key) async {
+    final docPath = await _getDocDirPath();
+    final legacyWords = File('$docPath/$key.words.json');
+    if (await legacyWords.exists()) return legacyWords;
+    final bookDir = await _getBookCacheDir(bookId);
+    return File('${bookDir.path}/$key.words.json');
+  }
+
+  /// Verifica rápido si este párrafo ya está descargado en la caché del celular (estilo YouTube Music)
+  Future<bool> isSegmentCached({
+    required String bookId,
+    required ChapterItem chapter,
+    required int segIdx,
+    required String voiceKey,
+  }) async {
+    final key = segmentKeyId(bookId, chapter, segIdx, voiceKey);
+    final file = await _getSegmentFile(bookId, key);
+    return await file.exists() && await file.length() > 800;
   }
 
   Future<File> synthesizeSegment({
@@ -76,26 +125,28 @@ class TtsSynthesisService {
     required String text,
     required String voiceKey,
   }) {
-    purgeLegacyCacheIfNeeded();
+    unawaited(purgeLegacyCacheIfNeeded());
     final key = segmentKeyId(bookId, chapter, segIdx, voiceKey);
     if (_inFlightSynthesis.containsKey(key)) {
       return _inFlightSynthesis[key]!;
     }
 
-    final future = _doSynthesizeSegment(key, text, voiceKey).whenComplete(() {
+    final future = _doSynthesizeWithRetry(bookId, key, text, voiceKey).whenComplete(() {
       _inFlightSynthesis.remove(key);
     });
     _inFlightSynthesis[key] = future;
     return future;
   }
 
-  Future<File> _doSynthesizeSegment(
+  Future<File> _doSynthesizeWithRetry(
+    String bookId,
     String key,
     String text,
     String voiceKey,
   ) async {
-    final finalFile = await _getSegmentFile(key);
-    final wordsFile = await _getSegmentWordsFile(key);
+    // 1. Si ya está en caché local en disco, devolver en 0ms sin tocar internet
+    final finalFile = await _getSegmentFile(bookId, key);
+    final wordsFile = await _getSegmentWordsFile(bookId, key);
 
     if (await finalFile.exists() && await finalFile.length() > 800) {
       if (!_segmentWordTimings.containsKey(key) && await wordsFile.exists()) {
@@ -104,12 +155,40 @@ class TtsSynthesisService {
           final list = (jsonDecode(rawJson) as List)
               .map((e) => WordTimingItem.fromJson(Map<String, dynamic>.from(e as Map)))
               .toList();
-          _segmentWordTimings[key] = list;
+          _putTimingsInRamCache(key, list);
         } catch (_) {}
       }
       return finalFile;
     }
 
+    // 2. Si no está en disco, descargar en streaming con timeout estricto (evita loading infinito en LTE inestable)
+    Object? lastError;
+    for (int attempt = 1; attempt <= 2; attempt++) {
+      try {
+        return await _downloadSegmentFromEdgeTts(
+          finalFile: finalFile,
+          wordsFile: wordsFile,
+          key: key,
+          text: text,
+          voiceKey: voiceKey,
+        ).timeout(const Duration(seconds: 14));
+      } catch (e) {
+        lastError = e;
+        if (attempt < 2) {
+          await Future<void>.delayed(const Duration(milliseconds: 900));
+        }
+      }
+    }
+    throw lastError ?? TimeoutException('Conexión inestable al sintetizar audio');
+  }
+
+  Future<File> _downloadSegmentFromEdgeTts({
+    required File finalFile,
+    required File wordsFile,
+    required String key,
+    required String text,
+    required String voiceKey,
+  }) async {
     final cleanSpeakText = TextSanitizer.humanizeTextForNaturalSpeech(text);
     final tempFile = File('${finalFile.path}.tmp');
 
@@ -125,7 +204,8 @@ class TtsSynthesisService {
     final audioBuilder = BytesBuilder(copy: false);
     final List<WordTimingItem> timings = [];
 
-    await for (final event in tts.stream()) {
+    // Timeout de 9 segundos entre paquetes del stream: si el 4G/LTE se corta en ruta, corta rápido para poder reintentar
+    await for (final event in tts.stream().timeout(const Duration(seconds: 9))) {
       if (event is AudioDataEvent) {
         audioBuilder.add(event.data);
       } else if (event is WordBoundaryEvent) {
@@ -143,7 +223,7 @@ class TtsSynthesisService {
 
     final bytes = audioBuilder.toBytes();
     if (bytes.length < 256) {
-      throw Exception('Audio vacío recibido del servidor');
+      throw Exception('Audio incompleto recibido de la red');
     }
 
     await tempFile.writeAsBytes(bytes, flush: true);
@@ -153,7 +233,7 @@ class TtsSynthesisService {
     final savedMp3 = await tempFile.rename(finalFile.path);
 
     if (timings.isNotEmpty) {
-      _segmentWordTimings[key] = timings;
+      _putTimingsInRamCache(key, timings);
       try {
         await wordsFile.writeAsString(
           jsonEncode(timings.map((t) => t.toJson()).toList()),

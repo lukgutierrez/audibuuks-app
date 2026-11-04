@@ -1369,6 +1369,9 @@ class _PlayerScreenState extends State<PlayerScreen>
           onSeekToPosition: (chIdx, segIdx) {
             if (chIdx < 0 || chIdx >= widget.book.chapters.length) return;
             final targetCh = widget.book.chapters[chIdx];
+            widget.book.lastChapterIndex = chIdx;
+            widget.book.lastSegmentIndex = segIdx;
+            widget.book.totalSegmentsInLastChapter = max(1, targetCh.segments.length);
             if (targetCh.id == _currentChapter.id) {
               _playSegmentAtIndex(segIdx, _synthesisGeneration);
             } else {

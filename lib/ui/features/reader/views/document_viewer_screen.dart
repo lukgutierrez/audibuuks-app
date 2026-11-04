@@ -112,6 +112,9 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
   bool _isProgrammaticPageTurn = false;
 
   final Map<int, Uint8List> _pdfPageCache = {};
+  final List<int> _cacheLruOrder = [];
+  static const int _maxCachedPages = 12;
+  final Set<int> _pagesBeingLoaded = {};
   final Map<int, PdfPageOverlayData> _pdfOverlayCache = {};
   bool _hasLocalPdf = false;
   bool _isLoadingPdfPage = false;
@@ -912,19 +915,53 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     }
   }
 
+  void _recordPageCacheHit(int pageIndex, Uint8List bytes) {
+    _pdfPageCache[pageIndex] = bytes;
+    _cacheLruOrder.remove(pageIndex);
+    _cacheLruOrder.add(pageIndex);
+
+    // Si supera el límite de memoria permitido en RAM, desalojamos las páginas más antiguas
+    while (_cacheLruOrder.length > _maxCachedPages) {
+      final oldestPage = _cacheLruOrder.removeAt(0);
+      // Nunca desalojar la página actualmente visible ni la página sincronizada con el audio
+      if (oldestPage != _currentPdfPage && oldestPage != _audioSyncedPdfPage) {
+        _pdfPageCache.remove(oldestPage);
+        _pdfOverlayCache.remove(oldestPage);
+      } else {
+        _cacheLruOrder.add(oldestPage);
+        break;
+      }
+    }
+  }
+
   Future<void> _loadPdfPage(int pageIndex) async {
     if (pageIndex < 0 || (_totalPdfPages > 0 && pageIndex >= _totalPdfPages)) return;
     if (_autoFollowAudio || pageIndex == _audioSyncedPdfPage) {
       _ensurePageOverlayExtracted(pageIndex);
     }
-    if (_pdfPageCache.containsKey(pageIndex)) return;
+    if (_pdfPageCache.containsKey(pageIndex)) {
+      _cacheLruOrder.remove(pageIndex);
+      _cacheLruOrder.add(pageIndex);
+      return;
+    }
+    if (_pagesBeingLoaded.contains(pageIndex)) return;
+    _pagesBeingLoaded.add(pageIndex);
+
     final path = widget.book.originalFilePath;
-    if (path == null) return;
-    final res = await NativeChannelService.renderPdfPage(path, pageIndex, width: 1300);
-    if (res != null && mounted && res['bytes'] is Uint8List) {
-      setState(() {
-        _pdfPageCache[pageIndex] = res['bytes'] as Uint8List;
-      });
+    if (path == null) {
+      _pagesBeingLoaded.remove(pageIndex);
+      return;
+    }
+    try {
+      final res = await NativeChannelService.renderPdfPage(path, pageIndex, width: 1300);
+      if (res != null && mounted && res['bytes'] is Uint8List) {
+        setState(() {
+          _recordPageCacheHit(pageIndex, res['bytes'] as Uint8List);
+        });
+      }
+    } catch (_) {
+    } finally {
+      _pagesBeingLoaded.remove(pageIndex);
     }
   }
 
@@ -1229,12 +1266,11 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           onPageChanged: (pageIdx) {
             setState(() {
               _currentPdfPage = pageIdx;
-              // Si el usuario pasa de página manualmente lejos del audio, entra en Modo Libre automático
-              if (!_isProgrammaticPageTurn && pageIdx != _audioSyncedPdfPage) {
-                _autoFollowAudio = false;
-              }
+              // El Modo Libre SOLO se activa cuando el usuario pulsa explícitamente el botón en la barra superior.
             });
-            _preloadPdfPages([pageIdx - 1, pageIdx + 1, pageIdx + 2]);
+            if (!_isProgrammaticPageTurn) {
+              _preloadPdfPages([pageIdx - 1, pageIdx + 1, pageIdx + 2]);
+            }
           },
           itemBuilder: (context, pageIdx) {
             final bytes = _pdfPageCache[pageIdx];
@@ -1393,7 +1429,13 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                           max: max(0.0, _totalPdfPages - 1.0),
                           onChanged: (val) {
                             final p = val.round();
-                            _pdfPageController?.jumpToPage(p);
+                            if (p != _currentPdfPage) {
+                              setState(() => _currentPdfPage = p);
+                              _pageTurnDebounceTimer?.cancel();
+                              _pageTurnDebounceTimer = Timer(const Duration(milliseconds: 120), () {
+                                _pdfPageController?.jumpToPage(p);
+                              });
+                            }
                           },
                         ),
                       ),

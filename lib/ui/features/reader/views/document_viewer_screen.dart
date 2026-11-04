@@ -6,11 +6,60 @@ import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:syncfusion_flutter_pdf/pdf.dart';
 
+import '../../../../core/utils/text_sanitizer.dart';
 import '../../../../data/repositories/library_repository.dart';
 import '../../../../data/services/native_channel_service.dart';
+import '../../../../data/services/tts_synthesis_service.dart';
 import '../../../../domain/models/book_item.dart';
 import '../../../../domain/models/chapter_item.dart';
+import '../../../shared/widgets/book_cover_widget.dart';
+
+/// Palabra individual con coordenadas normalizadas (0.0 a 1.0) respecto al ancho/alto de la hoja PDF
+class PdfNormalizedWord {
+  final String text;
+  final String cleanToken;
+  final Rect normBounds;
+
+  const PdfNormalizedWord({
+    required this.text,
+    required this.cleanToken,
+    required this.normBounds,
+  });
+}
+
+/// Línea de texto del PDF con sus coordenadas normalizadas (0.0 a 1.0) y sus palabras
+class PdfNormalizedLine {
+  final String text;
+  final String cleanText;
+  final Rect normBounds;
+  final List<PdfNormalizedWord> words;
+
+  const PdfNormalizedLine({
+    required this.text,
+    required this.cleanText,
+    required this.normBounds,
+    required this.words,
+  });
+}
+
+/// Geometría extraída de una página del PDF para subrayado en vivo y toque directo
+class PdfPageOverlayData {
+  final double pageWidth;
+  final double pageHeight;
+  final String fullCleanPageText;
+  final List<PdfNormalizedLine> lines;
+
+  const PdfPageOverlayData({
+    required this.pageWidth,
+    required this.pageHeight,
+    required this.fullCleanPageText,
+    required this.lines,
+  });
+
+  double get aspectRatio => pageHeight > 0 ? (pageWidth / pageHeight) : 0.707;
+}
 
 class DocumentViewerScreen extends StatefulWidget {
   final BookItem book;
@@ -39,32 +88,46 @@ class DocumentViewerScreen extends StatefulWidget {
 }
 
 class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
-  late int _viewerMode; // 0 = PDF Original (con imágenes), 1 = Modo Lectura Texto
-  late int _activeChapterIndex;
-  double _fontSize = 17.5;
+  final TtsSynthesisService _ttsService = TtsSynthesisService();
 
-  // Filtro visual para las hojas del PDF: 0 = Original (Blanco), 1 = Sepia Cálido, 2 = Modo Noche Oscuro
+  late int _viewerMode; // 0 = PDF Original con subrayado en vivo, 1 = Modo Texto
+  late int _activeChapterIndex;
+  double _fontSize = 18.0;
+
+  // Filtro visual de hoja PDF: 0 = Original (Blanco), 1 = Sepia Cálido, 2 = Modo Noche Oscuro
   int _pdfColorTheme = 0;
+  bool _showPageSliderBar = false;
   bool _immersiveFullscreen = false;
-  bool _autoFollowAudio = true;
 
   PageController? _pdfPageController;
+  PdfDocument? _pdfDoc;
+  PdfTextExtractor? _pdfTextExtractor;
   int _currentPdfPage = 0;
   int _totalPdfPages = 0;
   int _audioSyncedPdfPage = 0;
+  bool _isProgrammaticPageTurn = false;
+
   final Map<int, Uint8List> _pdfPageCache = {};
+  final Map<int, PdfPageOverlayData> _pdfOverlayCache = {};
   bool _hasLocalPdf = false;
   bool _isLoadingPdfPage = false;
 
-  // Estado en vivo del narrador mientras el visor está abierto
+  // Estado en tiempo real del audio para subrayar línea y palabra exacta sobre el PDF
   late int _liveAudioChapterIndex;
   late int _liveAudioSegmentIndex;
+  Duration _livePosition = Duration.zero;
+  Duration _liveDuration = const Duration(seconds: 8);
+  String _selectedVoiceKey = 'es-MX-JorgeNeural';
+
   final ScrollController _textScrollController = ScrollController();
   final GlobalKey _activeTextSegmentKey = GlobalKey();
 
   StreamSubscription<PlayerState>? _playerSub;
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration?>? _durationSub;
   StreamSubscription<SequenceState?>? _sequenceSub;
   Timer? _liveSyncTimer;
+  Timer? _pageTurnDebounceTimer;
   bool _isPlaying = false;
 
   @override
@@ -85,23 +148,10 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
         widget.book.originalFilePath!.toLowerCase().endsWith('.pdf') &&
         File(widget.book.originalFilePath!).existsSync();
 
-    // Por defecto abrimos en Modo PDF Original (0) a menos que sea explícitamente un EPUB
     _viewerMode = (widget.book.fileType == 'epub') ? 1 : 0;
 
-    _isPlaying = widget.player.playing;
-    _playerSub = widget.player.playerStateStream.listen((state) {
-      if (mounted && _isPlaying != state.playing) {
-        setState(() => _isPlaying = state.playing);
-      }
-    });
-
-    // Escucha cambios de párrafo/capítulo en tiempo real mientras se reproduce el audio
-    _sequenceSub = widget.player.sequenceStateStream.listen((_) {
-      _syncWithLiveBookProgress();
-    });
-    _liveSyncTimer = Timer.periodic(const Duration(milliseconds: 650), (_) {
-      _syncWithLiveBookProgress();
-    });
+    _loadVoicePreference();
+    _setupLiveAudioListeners();
 
     if (_hasLocalPdf) {
       _initPdfRenderer();
@@ -110,17 +160,78 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     }
   }
 
+  Future<void> _loadVoicePreference() async {
+    final prefs = await LibraryRepository().loadPlayerPreferences();
+    if (mounted && prefs['voiceKey'] is String) {
+      setState(() {
+        _selectedVoiceKey = prefs['voiceKey'] as String;
+      });
+    }
+  }
+
+  void _setupLiveAudioListeners() {
+    _isPlaying = widget.player.playing;
+    _livePosition = widget.player.position;
+    if (widget.player.duration != null) {
+      _liveDuration = widget.player.duration!;
+    }
+
+    _playerSub = widget.player.playerStateStream.listen((state) {
+      if (mounted && _isPlaying != state.playing) {
+        setState(() => _isPlaying = state.playing);
+      }
+    });
+
+    _positionSub = widget.player.positionStream.listen((pos) {
+      if (!mounted) return;
+      if ((pos.inMilliseconds - _livePosition.inMilliseconds).abs() >= 90 ||
+          pos == Duration.zero) {
+        setState(() => _livePosition = pos);
+      }
+    });
+
+    _durationSub = widget.player.durationStream.listen((dur) {
+      if (mounted && dur != null && dur != _liveDuration) {
+        setState(() => _liveDuration = dur);
+      }
+    });
+
+    _sequenceSub = widget.player.sequenceStateStream.listen((_) {
+      _syncWithLiveBookProgress();
+    });
+
+    _liveSyncTimer = Timer.periodic(const Duration(milliseconds: 450), (_) {
+      _syncWithLiveBookProgress();
+    });
+  }
+
   @override
   void dispose() {
+    _pageTurnDebounceTimer?.cancel();
     _liveSyncTimer?.cancel();
     _playerSub?.cancel();
+    _positionSub?.cancel();
+    _durationSub?.cancel();
     _sequenceSub?.cancel();
     _pdfPageController?.dispose();
     _textScrollController.dispose();
+    _pdfDoc?.dispose();
     super.dispose();
   }
 
-  /// Sincroniza en vivo el capítulo, párrafo y página del PDF a medida que el narrador avanza
+  static String _normalizeToken(String input) {
+    return input
+        .toLowerCase()
+        .replaceAll('á', 'a')
+        .replaceAll('é', 'e')
+        .replaceAll('í', 'i')
+        .replaceAll('ó', 'o')
+        .replaceAll('ú', 'u')
+        .replaceAll('ü', 'u')
+        .replaceAll(RegExp(r'[^a-zñ0-9]'), '');
+  }
+
+  /// Sincroniza en vivo cuando el narrador avanza al siguiente párrafo o capítulo
   void _syncWithLiveBookProgress() {
     if (!mounted) return;
     final newChIdx = widget.book.lastChapterIndex.clamp(
@@ -131,32 +242,40 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
 
     if (newChIdx != _liveAudioChapterIndex || newSegIdx != _liveAudioSegmentIndex) {
       final prevSyncedPage = _audioSyncedPdfPage;
-      final bool wasOnSyncedPage = (_currentPdfPage == prevSyncedPage);
+      final bool wasFollowingOnSyncedPage = (_currentPdfPage == prevSyncedPage);
 
-      setState(() {
-        _liveAudioChapterIndex = newChIdx;
-        _liveAudioSegmentIndex = newSegIdx;
-        if (_totalPdfPages > 0) {
-          _audioSyncedPdfPage = _calculateExactAudioPdfPage(_totalPdfPages);
+      _liveAudioChapterIndex = newChIdx;
+      _liveAudioSegmentIndex = newSegIdx;
+
+      if (_totalPdfPages > 0) {
+        final nextPage = _findBestPdfPageForActiveSegment(_totalPdfPages);
+        setState(() {
+          _audioSyncedPdfPage = nextPage;
+        });
+
+        // Si el audio cruza a la página siguiente mientras el usuario está viendo la hoja sincronizada,
+        // el PDF da vuelta la hoja automáticamente sin disparar un seek redundante.
+        if (_viewerMode == 0 &&
+            wasFollowingOnSyncedPage &&
+            nextPage != _currentPdfPage &&
+            _pdfPageController != null &&
+            _pdfPageController!.hasClients) {
+          _isProgrammaticPageTurn = true;
+          _pdfPageController!
+              .animateToPage(
+                nextPage,
+                duration: const Duration(milliseconds: 360),
+                curve: Curves.easeOutCubic,
+              )
+              .whenComplete(() {
+            _isProgrammaticPageTurn = false;
+          });
         }
-      });
-
-      // Si el usuario tiene activo el seguimiento en vivo y estaba en la página del audio,
-      // avanzamos automáticamente la página del PDF cuando el narrador cruza de hoja.
-      if (_viewerMode == 0 &&
-          _autoFollowAudio &&
-          wasOnSyncedPage &&
-          _totalPdfPages > 0 &&
-          _audioSyncedPdfPage != _currentPdfPage) {
-        _pdfPageController?.animateToPage(
-          _audioSyncedPdfPage,
-          duration: const Duration(milliseconds: 380),
-          curve: Curves.easeOutCubic,
-        );
+      } else {
+        setState(() {});
       }
 
-      // En Modo Texto, si sigue el audio, mantener el capítulo y hacer auto-scroll suave
-      if (_viewerMode == 1 && _autoFollowAudio) {
+      if (_viewerMode == 1) {
         if (_activeChapterIndex != newChIdx) {
           setState(() => _activeChapterIndex = newChIdx);
         }
@@ -165,9 +284,9 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           if (ctx != null) {
             Scrollable.ensureVisible(
               ctx,
-              duration: const Duration(milliseconds: 320),
+              duration: const Duration(milliseconds: 300),
               curve: Curves.easeOutCubic,
-              alignment: 0.28,
+              alignment: 0.3,
             );
           }
         });
@@ -175,7 +294,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     }
   }
 
-  /// Extrae el rango de páginas reales [startPageZeroBased, endPageZeroBased] buscando tanto en title como en subtitle ("Capítulo 5: Págs. 41-50")
+  /// Extrae el rango de páginas reales [startPageZeroBased, endPageZeroBased] leyendo tanto title como subtitle
   List<int>? _parseChapterPageRange(ChapterItem ch) {
     final combined = '${ch.title} ${ch.subtitle}';
     final m = RegExp(r'Págs?\.\s*(\d+)(?:\s*-\s*(\d+))?', caseSensitive: false)
@@ -186,8 +305,8 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     return [max(0, start), max(0, end)];
   }
 
-  /// Calcula la página exacta del PDF (0-based) donde está hablando el narrador ahora mismo
-  int _calculateExactAudioPdfPage(int totalPages) {
+  /// Calcula la página del PDF donde aparece el párrafo activo (verifica también el texto real extraído del PDF para precisión 100%)
+  int _findBestPdfPageForActiveSegment(int totalPages) {
     if (totalPages <= 0) return 0;
     final chIdx = _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1);
     final ch = widget.book.chapters[chIdx];
@@ -195,25 +314,307 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     final totalSegs = max(1, segs.length);
     final segIdx = _liveAudioSegmentIndex.clamp(0, totalSegs - 1);
 
+    int estimatedPage = 0;
     final range = _parseChapterPageRange(ch);
     if (range != null) {
       final startP = range[0].clamp(0, totalPages - 1);
       final endP = range[1].clamp(startP, totalPages - 1);
       final pageSpan = max(1, endP - startP + 1);
       final pageOffset = ((segIdx / totalSegs) * pageSpan).floor().clamp(0, pageSpan - 1);
-      return (startP + pageOffset).clamp(0, totalPages - 1);
+      estimatedPage = (startP + pageOffset).clamp(0, totalPages - 1);
+    } else {
+      final segRatio = (segIdx / totalSegs).clamp(0.0, 0.999);
+      final bookRatio = (chIdx + segRatio) / max(1, widget.book.chapters.length);
+      estimatedPage = (bookRatio * totalPages).floor().clamp(0, totalPages - 1);
     }
 
-    // Fallback proporcional si el capítulo no tenía rango explícito en el título
-    final segRatio = (segIdx / totalSegs).clamp(0.0, 0.999);
-    final bookRatio = (chIdx + segRatio) / max(1, widget.book.chapters.length);
-    return (bookRatio * totalPages).floor().clamp(0, totalPages - 1);
+    // Si tenemos el documento PDF cargado, verificamos en [estimatedPage, estimatedPage-1, estimatedPage+1]
+    // en cuál de esas hojas aparece realmente la frase actual para que el subrayado coincida siempre al 100%
+    if (_pdfDoc != null && segs.isNotEmpty) {
+      final snippetWords = segs[segIdx]
+          .split(RegExp(r'\s+'))
+          .map(_normalizeToken)
+          .where((w) => w.length >= 4)
+          .take(8)
+          .toList();
+
+      if (snippetWords.length >= 2) {
+        final candidates = <int>{
+          estimatedPage,
+          if (estimatedPage + 1 < totalPages) estimatedPage + 1,
+          if (estimatedPage - 1 >= 0) estimatedPage - 1,
+          if (range != null) ...List.generate(range[1] - range[0] + 1, (i) => range[0] + i),
+        };
+
+        int bestPage = estimatedPage;
+        int bestHits = -1;
+        for (final cand in candidates) {
+          if (cand < 0 || cand >= totalPages) continue;
+          final overlay = _ensurePageOverlayExtracted(cand);
+          if (overlay == null || overlay.fullCleanPageText.isEmpty) continue;
+          int hits = 0;
+          for (final w in snippetWords) {
+            if (overlay.fullCleanPageText.contains(w)) hits++;
+          }
+          if (hits > bestHits) {
+            bestHits = hits;
+            bestPage = cand;
+          }
+          if (hits == snippetWords.length) {
+            return cand;
+          }
+        }
+        if (bestHits >= 2) {
+          return bestPage;
+        }
+      }
+    }
+
+    return estimatedPage;
   }
 
-  /// Devuelve el capítulo y el rango de índices de párrafos [startSeg, endSeg] que corresponden a una página del PDF (0-based)
+  /// Extrae y cachea las líneas y palabras con sus coordenadas exactas (Rect) de la página `pageIndex`
+  PdfPageOverlayData? _ensurePageOverlayExtracted(int pageIndex) {
+    if (_pdfOverlayCache.containsKey(pageIndex)) {
+      return _pdfOverlayCache[pageIndex];
+    }
+    if (_pdfDoc == null || _pdfTextExtractor == null) return null;
+    if (pageIndex < 0 || pageIndex >= _pdfDoc!.pages.count) return null;
+
+    try {
+      final page = _pdfDoc!.pages[pageIndex];
+      final double pageW = max(1.0, page.size.width);
+      final double pageH = max(1.0, page.size.height);
+
+      final rawLines = _pdfTextExtractor!.extractTextLines(
+        startPageIndex: pageIndex,
+        endPageIndex: pageIndex,
+      );
+
+      final List<PdfNormalizedLine> normLines = [];
+      final StringBuffer pageCleanBuf = StringBuffer();
+
+      for (final line in rawLines) {
+        final lineStr = line.text.trim();
+        if (lineStr.isEmpty) continue;
+
+        final List<PdfNormalizedWord> normWords = [];
+        final List<String> cleanWordTokens = [];
+
+        for (final w in line.wordCollection) {
+          final wText = w.text.trim();
+          if (wText.isEmpty) continue;
+          final cleanW = _normalizeToken(wText);
+          if (cleanW.isNotEmpty) {
+            cleanWordTokens.add(cleanW);
+          }
+          final wb = w.bounds;
+          normWords.add(
+            PdfNormalizedWord(
+              text: wText,
+              cleanToken: cleanW,
+              normBounds: Rect.fromLTWH(
+                (wb.left / pageW).clamp(0.0, 1.0),
+                (wb.top / pageH).clamp(0.0, 1.0),
+                (wb.width / pageW).clamp(0.005, 1.0),
+                (wb.height / pageH).clamp(0.005, 1.0),
+              ),
+            ),
+          );
+        }
+
+        final lb = line.bounds;
+        final cleanLineStr = cleanWordTokens.join(' ');
+        if (cleanLineStr.isNotEmpty) {
+          pageCleanBuf.write('$cleanLineStr ');
+        }
+
+        normLines.add(
+          PdfNormalizedLine(
+            text: lineStr,
+            cleanText: cleanLineStr,
+            normBounds: Rect.fromLTWH(
+              (lb.left / pageW).clamp(0.0, 1.0),
+              (lb.top / pageH).clamp(0.0, 1.0),
+              (lb.width / pageW).clamp(0.01, 1.0),
+              (lb.height / pageH).clamp(0.008, 1.0),
+            ),
+            words: normWords,
+          ),
+        );
+      }
+
+      final overlay = PdfPageOverlayData(
+        pageWidth: pageW,
+        pageHeight: pageH,
+        fullCleanPageText: pageCleanBuf.toString(),
+        lines: normLines,
+      );
+      _pdfOverlayCache[pageIndex] = overlay;
+      return overlay;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  /// Encuentra qué líneas y qué palabra individual de la página PDF corresponden al párrafo y milisegundo actual del narrador
+  ({ List<Rect> activeLineRects, Rect? activeWordRect }) _computeActiveHighlightRectsForPage(
+    int pageIndex,
+  ) {
+    if (pageIndex != _audioSyncedPdfPage) {
+      return (activeLineRects: const [], activeWordRect: null);
+    }
+    final overlay = _ensurePageOverlayExtracted(pageIndex);
+    if (overlay == null || overlay.lines.isEmpty) {
+      return (activeLineRects: const [], activeWordRect: null);
+    }
+
+    final chIdx = _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1);
+    final ch = widget.book.chapters[chIdx];
+    final segs = ch.segments;
+    if (segs.isEmpty) {
+      return (activeLineRects: const [], activeWordRect: null);
+    }
+    final segIdx = _liveAudioSegmentIndex.clamp(0, segs.length - 1);
+    final activeParagraph = segs[segIdx];
+
+    final segWords = activeParagraph
+        .split(RegExp(r'\s+'))
+        .map(_normalizeToken)
+        .where((w) => w.isNotEmpty)
+        .toList();
+    if (segWords.isEmpty) {
+      return (activeLineRects: const [], activeWordRect: null);
+    }
+
+    final segWordSet = segWords.where((w) => w.length >= 3).toSet();
+    final String segJoined = segWords.join(' ');
+
+    // Buscamos el bloque contiguo de líneas en la página que mejor coincide con el párrafo actual
+    final List<int> matchedLineIndices = [];
+    for (int i = 0; i < overlay.lines.length; i++) {
+      final line = overlay.lines[i];
+      if (line.cleanText.isEmpty) continue;
+
+      if (segJoined.contains(line.cleanText) || line.cleanText.contains(segJoined)) {
+        matchedLineIndices.add(i);
+        continue;
+      }
+
+      final lineTokens = line.words
+          .map((w) => w.cleanToken)
+          .where((t) => t.length >= 3)
+          .toList();
+      if (lineTokens.isEmpty) continue;
+
+      int hits = 0;
+      for (final lt in lineTokens) {
+        if (segWordSet.contains(lt)) hits++;
+      }
+      final ratio = hits / lineTokens.length;
+      if (ratio >= 0.55 || (hits >= 3 && ratio >= 0.42)) {
+        matchedLineIndices.add(i);
+      }
+    }
+
+    // Si alguna línea intermedia quedó suelta entre dos líneas del mismo párrafo, la incluimos para que el bloque sea continuo
+    if (matchedLineIndices.length >= 2) {
+      final firstIdx = matchedLineIndices.first;
+      final lastIdx = matchedLineIndices.last;
+      if (lastIdx - firstIdx <= 14) {
+        matchedLineIndices
+          ..clear()
+          ..addAll(List.generate(lastIdx - firstIdx + 1, (k) => firstIdx + k));
+      }
+    }
+
+    // Fallback proporcional dentro de la página si el PDF tiene codificación especial de fuentes
+    if (matchedLineIndices.isEmpty && overlay.lines.isNotEmpty) {
+      final info = _resolveChapterAndSegmentsForPdfPage(pageIndex);
+      final spanSegs = max(1, info.endSeg - info.startSeg + 1);
+      final localSegOffset = (segIdx - info.startSeg).clamp(0, spanSegs - 1);
+      final startLine = ((localSegOffset / spanSegs) * overlay.lines.length)
+          .floor()
+          .clamp(0, overlay.lines.length - 1);
+      final endLine = (((localSegOffset + 1) / spanSegs) * overlay.lines.length)
+          .ceil()
+          .clamp(startLine + 1, overlay.lines.length);
+      for (int i = startLine; i < endLine; i++) {
+        matchedLineIndices.add(i);
+      }
+    }
+
+    final List<Rect> lineRects = [];
+    final List<PdfNormalizedWord> paragraphPdfWords = [];
+
+    for (final idx in matchedLineIndices) {
+      final l = overlay.lines[idx];
+      lineRects.add(l.normBounds);
+      paragraphPdfWords.addAll(l.words.where((w) => w.cleanToken.isNotEmpty));
+    }
+
+    // Determinar la palabra individual activa dentro del párrafo
+    Rect? activeWordRect;
+    if (paragraphPdfWords.isNotEmpty) {
+      final posMs = _livePosition.inMilliseconds;
+      final timings = _ttsService.getWordTimings(
+        widget.book.id,
+        ch,
+        segIdx,
+        _selectedVoiceKey,
+      );
+
+      if (timings != null && timings.isNotEmpty) {
+        int eventIdx = 0;
+        for (int i = 0; i < timings.length; i++) {
+          if (posMs >= timings[i].startMs - 45) {
+            eventIdx = i;
+          } else {
+            break;
+          }
+        }
+        final ratio = (eventIdx / max(1, timings.length - 1)).clamp(0.0, 1.0);
+        final expectedIdx = (ratio * (paragraphPdfWords.length - 1))
+            .round()
+            .clamp(0, paragraphPdfWords.length - 1);
+        final spokenClean = _normalizeToken(timings[eventIdx].word);
+
+        int bestIdx = expectedIdx;
+        if (spokenClean.isNotEmpty) {
+          final minSearch = max(0, expectedIdx - 5);
+          final maxSearch = min(paragraphPdfWords.length - 1, expectedIdx + 5);
+          int bestDist = 999;
+          for (int k = minSearch; k <= maxSearch; k++) {
+            final candToken = paragraphPdfWords[k].cleanToken;
+            if (candToken == spokenClean ||
+                (spokenClean.length >= 4 && candToken.startsWith(spokenClean))) {
+              final dist = (k - expectedIdx).abs();
+              if (dist < bestDist) {
+                bestDist = dist;
+                bestIdx = k;
+              }
+            }
+          }
+        }
+        activeWordRect = paragraphPdfWords[bestIdx].normBounds;
+      } else {
+        final totalMs = max(1200, _liveDuration.inMilliseconds);
+        final progress = (posMs / totalMs).clamp(0.0, 0.999);
+        final wordIdx = (progress * paragraphPdfWords.length)
+            .floor()
+            .clamp(0, paragraphPdfWords.length - 1);
+        activeWordRect = paragraphPdfWords[wordIdx].normBounds;
+      }
+    }
+
+    return (activeLineRects: lineRects, activeWordRect: activeWordRect);
+  }
+
+  /// Devuelve el capítulo y el rango de párrafos [startSeg, endSeg] que pertenecen a una página del PDF (0-based)
   ({ int chapterIndex, ChapterItem chapter, int startSeg, int endSeg }) _resolveChapterAndSegmentsForPdfPage(
     int targetPage,
   ) {
+    // 1. Buscar primero por rango explícito de páginas ("Págs. 41-50")
     for (int i = 0; i < widget.book.chapters.length; i++) {
       final ch = widget.book.chapters[i];
       final range = _parseChapterPageRange(ch);
@@ -222,6 +623,40 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
         if (segs.isEmpty) {
           return (chapterIndex: i, chapter: ch, startSeg: 0, endSeg: 0);
         }
+
+        // Si tenemos el texto extraído de esta página del PDF, buscamos exactamente cuál es el primer párrafo de este capítulo que aparece en la hoja
+        final overlay = _ensurePageOverlayExtracted(targetPage);
+        if (overlay != null && overlay.lines.isNotEmpty) {
+          int? firstMatchedSeg;
+          int? lastMatchedSeg;
+          for (int s = 0; s < segs.length; s++) {
+            final words = segs[s]
+                .split(RegExp(r'\s+'))
+                .map(_normalizeToken)
+                .where((w) => w.length >= 4)
+                .take(6)
+                .toList();
+            if (words.length >= 2) {
+              int hits = 0;
+              for (final w in words) {
+                if (overlay.fullCleanPageText.contains(w)) hits++;
+              }
+              if (hits >= (words.length * 0.6).ceil()) {
+                firstMatchedSeg ??= s;
+                lastMatchedSeg = s;
+              }
+            }
+          }
+          if (firstMatchedSeg != null) {
+            return (
+              chapterIndex: i,
+              chapter: ch,
+              startSeg: firstMatchedSeg,
+              endSeg: lastMatchedSeg ?? firstMatchedSeg,
+            );
+          }
+        }
+
         final pageSpan = max(1, range[1] - range[0] + 1);
         final pageIdxInChapter = targetPage - range[0];
         final startRatio = (pageIdxInChapter / pageSpan).clamp(0.0, 0.999);
@@ -239,7 +674,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       }
     }
 
-    // Fallback proporcional si no hay etiqueta de páginas
+    // 2. Fallback proporcional si no hay etiqueta de páginas
     final ratio = targetPage / max(1, _totalPdfPages);
     final chIdx = (ratio * widget.book.chapters.length)
         .floor()
@@ -254,8 +689,8 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     );
   }
 
-  /// Inicia inmediatamente la narración en la página del PDF que estás mirando (o en un párrafo específico)
-  void _playAudioFromPdfPage(int targetPage, {int? specificSegIdx}) {
+  /// Salta el audio a la página `targetPage` (o al párrafo exacto que el usuario tocó sobre la hoja del PDF)
+  void _seekAudioToPdfPage(int targetPage, {int? specificSegIdx}) {
     if (_totalPdfPages <= 0) return;
     final info = _resolveChapterAndSegmentsForPdfPage(targetPage);
     final targetSeg = specificSegIdx ?? info.startSeg;
@@ -265,268 +700,110 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       _liveAudioChapterIndex = info.chapterIndex;
       _liveAudioSegmentIndex = targetSeg;
       _audioSyncedPdfPage = targetPage;
-      _autoFollowAudio = true;
+      _livePosition = Duration.zero;
     });
 
     widget.onSeekToPosition?.call(info.chapterIndex, targetSeg);
-
-    ScaffoldMessenger.of(context).clearSnackBars();
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          '🔊 Narrando Pág. ${targetPage + 1} (${info.chapter.title} • Párr. ${targetSeg + 1})',
-          style: const TextStyle(fontWeight: FontWeight.w700, color: Colors.black),
-        ),
-        backgroundColor: const Color(0xFFF5A623),
-        behavior: SnackBarBehavior.floating,
-        duration: const Duration(milliseconds: 1800),
-      ),
-    );
   }
 
-  /// Abre un selector rápido con todos los párrafos de la página actual del PDF para elegir exactamente desde qué frase escuchar
-  void _showPageParagraphPickerModal(int targetPage) {
-    final info = _resolveChapterAndSegmentsForPdfPage(targetPage);
+  /// Si el usuario toca directamente una línea o párrafo sobre la hoja del PDF, salta el audio y el subrayado a esa línea exacta
+  void _onTapPdfPagePosition(
+    TapUpDetails details,
+    Size renderedBoxSize,
+    int pageIndex,
+  ) {
+    final overlay = _ensurePageOverlayExtracted(pageIndex);
+    if (overlay == null || overlay.lines.isEmpty) {
+      setState(() => _immersiveFullscreen = !_immersiveFullscreen);
+      return;
+    }
+
+    // Calcular el rectángulo real donde BoxFit.contain dibujó la página dentro de renderedBoxSize
+    final double pageAspect = overlay.aspectRatio;
+    final double boxAspect = renderedBoxSize.width / max(1.0, renderedBoxSize.height);
+
+    double drawnW;
+    double drawnH;
+    double offsetX = 0;
+    double offsetY = 0;
+
+    if (boxAspect > pageAspect) {
+      drawnH = renderedBoxSize.height;
+      drawnW = drawnH * pageAspect;
+      offsetX = (renderedBoxSize.width - drawnW) / 2.0;
+    } else {
+      drawnW = renderedBoxSize.width;
+      drawnH = drawnW / pageAspect;
+      offsetY = (renderedBoxSize.height - drawnH) / 2.0;
+    }
+
+    final localPos = details.localPosition;
+    final normX = (localPos.dx - offsetX) / max(1.0, drawnW);
+    final normY = (localPos.dy - offsetY) / max(1.0, drawnH);
+
+    if (normX < 0.0 || normX > 1.0 || normY < 0.0 || normY > 1.0) return;
+
+    // Buscar la línea del PDF más cercana verticalmente al toque del usuario
+    PdfNormalizedLine? tappedLine;
+    double bestDist = 0.045; // tolerancia vertical de ~4.5% de la altura de la hoja
+    for (final line in overlay.lines) {
+      if (normY >= line.normBounds.top - 0.012 &&
+          normY <= line.normBounds.bottom + 0.012) {
+        tappedLine = line;
+        break;
+      }
+      final centerDist = (normY - line.normBounds.center.dy).abs();
+      if (centerDist < bestDist) {
+        bestDist = centerDist;
+        tappedLine = line;
+      }
+    }
+
+    if (tappedLine == null || tappedLine.cleanText.isEmpty) return;
+
+    // Encontrar a qué párrafo del capítulo pertenece la línea tocada
+    final info = _resolveChapterAndSegmentsForPdfPage(pageIndex);
     final segs = info.chapter.segments;
     if (segs.isEmpty) return;
 
-    // Mostramos los párrafos de esta página primero (resaltados), y el resto del capítulo debajo
-    final int highlightStart = info.startSeg;
-    final int highlightEnd = info.endSeg;
+    final tappedTokens = tappedLine.words
+        .map((w) => w.cleanToken)
+        .where((t) => t.length >= 3)
+        .toList();
 
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: const Color(0xFF16181D),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
-      ),
-      builder: (_) {
-        return DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.65,
-          minChildSize: 0.40,
-          maxChildSize: 0.90,
-          builder: (_, scrollController) {
-            return Column(
-              children: [
-                const SizedBox(height: 12),
-                Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 14, 20, 10),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.record_voice_over_rounded, color: Color(0xFFF5A623)),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text(
-                              'Narrar desde Pág. ${targetPage + 1}',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.w800,
-                                fontSize: 17,
-                                color: Colors.white,
-                              ),
-                            ),
-                            Text(
-                              'Tocá cualquier párrafo de ${info.chapter.title} para empezar ahí',
-                              style: const TextStyle(color: Colors.white54, fontSize: 12),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                const Divider(color: Colors.white12, height: 1),
-                Expanded(
-                  child: ListView.builder(
-                    controller: scrollController,
-                    padding: const EdgeInsets.all(16),
-                    itemCount: segs.length,
-                    itemBuilder: (ctx, idx) {
-                      final bool isInThisPage = idx >= highlightStart && idx <= highlightEnd;
-                      final bool isPlayingNow =
-                          info.chapterIndex == _liveAudioChapterIndex &&
-                          idx == _liveAudioSegmentIndex;
+    int bestSegIdx = info.startSeg;
+    int bestScore = -1;
 
-                      return GestureDetector(
-                        onTap: () {
-                          Navigator.pop(ctx);
-                          _playAudioFromPdfPage(targetPage, specificSegIdx: idx);
-                        },
-                        child: Container(
-                          margin: const EdgeInsets.only(bottom: 10),
-                          padding: const EdgeInsets.all(14),
-                          decoration: BoxDecoration(
-                            color: isPlayingNow
-                                ? const Color(0xFFF5A623).withValues(alpha: 0.18)
-                                : (isInThisPage
-                                    ? Colors.white.withValues(alpha: 0.07)
-                                    : Colors.white.withValues(alpha: 0.02)),
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color: isPlayingNow
-                                  ? const Color(0xFFF5A623)
-                                  : (isInThisPage
-                                      ? const Color(0xFFF5A623).withValues(alpha: 0.45)
-                                      : Colors.white10),
-                              width: isPlayingNow ? 1.5 : 1.0,
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Row(
-                                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Icon(
-                                        isPlayingNow
-                                            ? Icons.graphic_eq_rounded
-                                            : Icons.play_circle_fill_rounded,
-                                        size: 16,
-                                        color: isPlayingNow || isInThisPage
-                                            ? const Color(0xFFF5A623)
-                                            : Colors.white54,
-                                      ),
-                                      const SizedBox(width: 6),
-                                      Text(
-                                        'Párrafo ${idx + 1}',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w800,
-                                          fontSize: 12,
-                                          color: isPlayingNow || isInThisPage
-                                              ? const Color(0xFFF5A623)
-                                              : Colors.white54,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  if (isInThisPage)
-                                    Container(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 2,
-                                      ),
-                                      decoration: BoxDecoration(
-                                        color: const Color(0xFFF5A623).withValues(alpha: 0.16),
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
-                                      child: Text(
-                                        isPlayingNow ? 'Sonando ahora' : 'En Pág. ${targetPage + 1}',
-                                        style: const TextStyle(
-                                          color: Color(0xFFF5A623),
-                                          fontSize: 10.5,
-                                          fontWeight: FontWeight.w700,
-                                        ),
-                                      ),
-                                    ),
-                                ],
-                              ),
-                              const SizedBox(height: 6),
-                              Text(
-                                segs[idx],
-                                maxLines: 3,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                  color: isInThisPage ? Colors.white : Colors.white70,
-                                  fontSize: 13.5,
-                                  height: 1.4,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
+    for (int s = 0; s < segs.length; s++) {
+      final cleanSeg = segs[s]
+          .split(RegExp(r'\s+'))
+          .map(_normalizeToken)
+          .where((w) => w.isNotEmpty)
+          .join(' ');
+
+      if (cleanSeg.contains(tappedLine.cleanText)) {
+        bestSegIdx = s;
+        bestScore = 999;
+        break;
+      }
+
+      int hits = 0;
+      for (final tok in tappedTokens) {
+        if (cleanSeg.contains(tok)) hits++;
+      }
+      // Bonus si el párrafo está dentro del rango estimado de esta página
+      if (s >= info.startSeg && s <= info.endSeg) {
+        hits += 1;
+      }
+      if (hits > bestScore) {
+        bestScore = hits;
+        bestSegIdx = s;
+      }
+    }
+
+    _seekAudioToPdfPage(pageIndex, specificSegIdx: bestSegIdx);
   }
 
-  /// Modal rápido para escribir o saltar a cualquier número de página del PDF
-  void _showJumpToPageDialog() {
-    if (_totalPdfPages <= 0) return;
-    final controller = TextEditingController(text: '${_currentPdfPage + 1}');
-    showDialog(
-      context: context,
-      builder: (ctx) {
-        return AlertDialog(
-          backgroundColor: const Color(0xFF1B1D24),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
-          title: const Text(
-            'Ir a la página',
-            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17),
-          ),
-          content: TextField(
-            controller: controller,
-            keyboardType: TextInputType.number,
-            autofocus: true,
-            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
-            decoration: InputDecoration(
-              hintText: '1 - $_totalPdfPages',
-              suffixText: 'de $_totalPdfPages',
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: Color(0xFFF5A623)),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: const BorderSide(color: Colors.white24),
-              ),
-            ),
-            onSubmitted: (_) {
-              final pageNum = int.tryParse(controller.text.trim());
-              Navigator.pop(ctx);
-              if (pageNum != null) {
-                final target = (pageNum - 1).clamp(0, _totalPdfPages - 1);
-                _pdfPageController?.jumpToPage(target);
-              }
-            },
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancelar', style: TextStyle(color: Colors.white54)),
-            ),
-            FilledButton(
-              style: FilledButton.styleFrom(
-                backgroundColor: const Color(0xFFF5A623),
-                foregroundColor: Colors.black,
-              ),
-              onPressed: () {
-                final pageNum = int.tryParse(controller.text.trim());
-                Navigator.pop(ctx);
-                if (pageNum != null) {
-                  final target = (pageNum - 1).clamp(0, _totalPdfPages - 1);
-                  _pdfPageController?.jumpToPage(target);
-                }
-              },
-              child: const Text('Ir a página', style: TextStyle(fontWeight: FontWeight.bold)),
-            ),
-          ],
-        );
-      },
-    );
-  }
-
-  /// Si el libro fue cargado en una versión anterior antes de guardar originalFilePath, busca automáticamente en books/
   Future<void> _tryAutoLocatePdfOnDevice() async {
     try {
       final docDir = await getApplicationDocumentsDirectory();
@@ -546,7 +823,6 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     } catch (_) {}
   }
 
-  /// Permite vincular en 1 toque el archivo PDF original para libros que habían sido importados en versiones viejas
   Future<void> _pickAndLinkOriginalPdf() async {
     try {
       const typeGroup = XTypeGroup(
@@ -585,13 +861,22 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     final path = widget.book.originalFilePath!;
     setState(() => _isLoadingPdfPage = true);
 
-    final res = await NativeChannelService.renderPdfPage(path, 0, width: 1250);
+    try {
+      final pdfBytes = await File(path).readAsBytes();
+      _pdfDoc?.dispose();
+      _pdfDoc = PdfDocument(inputBytes: pdfBytes);
+      _pdfTextExtractor = PdfTextExtractor(_pdfDoc!);
+    } catch (_) {}
+
+    final res = await NativeChannelService.renderPdfPage(path, 0, width: 1300);
     if (res != null && mounted) {
-      final total = (res['pageCount'] as int?) ?? 1;
+      final total = (res['pageCount'] as int?) ?? (_pdfDoc?.pages.count ?? 1);
       final firstBytes = res['bytes'] as Uint8List?;
       if (firstBytes != null) _pdfPageCache[0] = firstBytes;
 
-      final targetAudioPage = _calculateExactAudioPdfPage(total);
+      final targetAudioPage = _findBestPdfPageForActiveSegment(total);
+      _ensurePageOverlayExtracted(targetAudioPage);
+
       _pdfPageController?.dispose();
       _pdfPageController = PageController(initialPage: targetAudioPage);
 
@@ -613,10 +898,11 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
 
   Future<void> _loadPdfPage(int pageIndex) async {
     if (pageIndex < 0 || (_totalPdfPages > 0 && pageIndex >= _totalPdfPages)) return;
+    _ensurePageOverlayExtracted(pageIndex);
     if (_pdfPageCache.containsKey(pageIndex)) return;
     final path = widget.book.originalFilePath;
     if (path == null) return;
-    final res = await NativeChannelService.renderPdfPage(path, pageIndex, width: 1250);
+    final res = await NativeChannelService.renderPdfPage(path, pageIndex, width: 1300);
     if (res != null && mounted && res['bytes'] is Uint8List) {
       setState(() {
         _pdfPageCache[pageIndex] = res['bytes'] as Uint8List;
@@ -632,55 +918,18 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     }
   }
 
-  void _jumpToAudioPosition() {
-    setState(() => _autoFollowAudio = true);
-    if (_viewerMode == 0 && _totalPdfPages > 0) {
-      final targetPage = _calculateExactAudioPdfPage(_totalPdfPages);
-      setState(() => _audioSyncedPdfPage = targetPage);
-      _pdfPageController?.animateToPage(
-        targetPage,
-        duration: const Duration(milliseconds: 350),
-        curve: Curves.easeOutCubic,
-      );
-    } else {
-      setState(() {
-        _activeChapterIndex =
-            _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1);
-      });
-    }
-  }
-
-  String _getLiveAudioSnippetText() {
-    final chIdx = _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1);
-    final ch = widget.book.chapters[chIdx];
-    final segs = ch.segments;
-    if (segs.isEmpty) return ch.title;
-    final sIdx = _liveAudioSegmentIndex.clamp(0, segs.length - 1);
-    return segs[sIdx];
-  }
-
-  /// Devuelve el texto del primer párrafo estimado en la página que el usuario está explorando
-  String _getPreviewTextForPdfPage(int pageIdx) {
-    final info = _resolveChapterAndSegmentsForPdfPage(pageIdx);
-    final segs = info.chapter.segments;
-    if (segs.isEmpty) return info.chapter.title;
-    return segs[info.startSeg.clamp(0, segs.length - 1)];
-  }
-
   Widget _applyPdfThemeFilter(Widget child) {
     if (_pdfColorTheme == 1) {
-      // Filtro Sepia Cálido (descansa la vista)
       return ColorFiltered(
         colorFilter: const ColorFilter.matrix(<double>[
-          0.94, 0.0, 0.0, 0, 0,
-          0.0, 0.89, 0.0, 0, 0,
-          0.0, 0.0, 0.76, 0, 0,
+          0.95, 0.0, 0.0, 0, 0,
+          0.0, 0.90, 0.0, 0, 0,
+          0.0, 0.0, 0.78, 0, 0,
           0, 0, 0, 1, 0,
         ]),
         child: child,
       );
     } else if (_pdfColorTheme == 2) {
-      // Filtro Modo Noche Inteligente (invierte hoja blanca a carbón oscuro #141518 y letras a blanco cálido)
       return ColorFiltered(
         colorFilter: const ColorFilter.matrix(<double>[
           -0.88, 0, 0, 0, 240,
@@ -694,28 +943,70 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     return child;
   }
 
+  Duration get _activeChapterElapsed {
+    final ch = widget.book.chapters[
+        _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1)];
+    final segs = ch.segments;
+    if (segs.isEmpty) return Duration.zero;
+    final totalSec = max(15, ch.estimatedTotalSeconds);
+    final secPerSeg = totalSec / segs.length;
+    final baseSec = (_liveAudioSegmentIndex * secPerSeg).round();
+    return Duration(seconds: (baseSec + _livePosition.inSeconds).clamp(0, totalSec));
+  }
+
+  Duration get _activeChapterTotal {
+    final ch = widget.book.chapters[
+        _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1)];
+    return Duration(seconds: max(15, ch.estimatedTotalSeconds));
+  }
+
+  void _skipParagraph(int delta) {
+    final chIdx = _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1);
+    final ch = widget.book.chapters[chIdx];
+    final segs = ch.segments;
+    final nextSeg = _liveAudioSegmentIndex + delta;
+
+    if (nextSeg >= 0 && nextSeg < segs.length) {
+      setState(() {
+        _liveAudioSegmentIndex = nextSeg;
+        _livePosition = Duration.zero;
+      });
+      widget.onSeekToPosition?.call(chIdx, nextSeg);
+    } else if (delta > 0 && chIdx + 1 < widget.book.chapters.length) {
+      setState(() {
+        _liveAudioChapterIndex = chIdx + 1;
+        _liveAudioSegmentIndex = 0;
+        _livePosition = Duration.zero;
+      });
+      widget.onSeekToPosition?.call(chIdx + 1, 0);
+    } else if (delta < 0 && chIdx > 0) {
+      final prevCh = widget.book.chapters[chIdx - 1];
+      final lastSeg = max<int>(0, prevCh.segments.length - 1);
+      setState(() {
+        _liveAudioChapterIndex = chIdx - 1;
+        _liveAudioSegmentIndex = lastSeg;
+        _livePosition = Duration.zero;
+      });
+      widget.onSeekToPosition?.call(chIdx - 1, lastSeg);
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final currentCh = widget.book.chapters[_activeChapterIndex];
-    final audioCh = widget.book.chapters[
-        _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1)];
-    final bool isViewingDifferentPdfPage =
-        _viewerMode == 0 && _totalPdfPages > 0 && _currentPdfPage != _audioSyncedPdfPage;
-    final bool isViewingDifferentTextChapter =
-        _viewerMode == 1 && _activeChapterIndex != _liveAudioChapterIndex;
 
     return Scaffold(
-      backgroundColor: const Color(0xFF0E0F12),
+      backgroundColor: const Color(0xFF141518),
       appBar: _immersiveFullscreen
           ? null
           : AppBar(
-              backgroundColor: const Color(0xFF16181D),
+              backgroundColor: const Color(0xFF1A1B1F),
               elevation: 0,
               leading: IconButton(
-                icon: const Icon(Icons.arrow_back_ios_new_rounded, size: 20, color: Colors.white),
+                icon: const Icon(Icons.close_rounded, size: 22, color: Colors.white70),
+                tooltip: 'Volver al reproductor',
                 onPressed: () => Navigator.pop(context),
               ),
-              titleSpacing: 0,
               title: GestureDetector(
                 onTap: _viewerMode == 0 ? _showJumpToPageDialog : _showChapterSelector,
                 child: Column(
@@ -725,184 +1016,70 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                       widget.book.title,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 14.5),
+                      style: const TextStyle(
+                        fontWeight: FontWeight.w700,
+                        fontSize: 14,
+                        color: Colors.white,
+                      ),
                     ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Flexible(
-                          child: Text(
-                            _viewerMode == 0 && _totalPdfPages > 0
-                                ? 'Pág. ${_currentPdfPage + 1} de $_totalPdfPages'
-                                : currentCh.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Color(0xFFF5A623),
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 4),
-                        const Icon(
-                          Icons.unfold_more_rounded,
-                          size: 13,
-                          color: Color(0xFFF5A623),
-                        ),
-                      ],
+                    Text(
+                      _viewerMode == 0 && _totalPdfPages > 0
+                          ? 'Pág. ${_currentPdfPage + 1} de $_totalPdfPages • Tocá cualquier línea para narrar'
+                          : currentCh.title,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Color(0xFFF5A623),
+                        fontSize: 11,
+                        fontWeight: FontWeight.w600,
+                      ),
                     ),
                   ],
                 ),
               ),
               actions: [
-                if (_viewerMode == 0 && _hasLocalPdf)
-                  IconButton(
-                    tooltip: _pdfColorTheme == 0
-                        ? 'Cambiar a Modo Sepia'
-                        : (_pdfColorTheme == 1 ? 'Cambiar a Modo Noche' : 'Cambiar a PDF Original'),
-                    icon: Icon(
-                      _pdfColorTheme == 0
-                          ? Icons.wb_sunny_outlined
-                          : (_pdfColorTheme == 1
-                              ? Icons.auto_awesome_mosaic_outlined
-                              : Icons.dark_mode_rounded),
-                      size: 20,
-                      color: _pdfColorTheme == 0 ? Colors.white70 : const Color(0xFFF5A623),
-                    ),
-                    onPressed: () {
-                      setState(() {
-                        _pdfColorTheme = (_pdfColorTheme + 1) % 3;
-                      });
-                    },
+                IconButton(
+                  icon: Icon(
+                    Icons.border_color_rounded,
+                    size: 19,
+                    color: _viewerMode == 0 ? const Color(0xFFF5A623) : Colors.white54,
                   ),
-                Container(
-                  margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
-                  padding: const EdgeInsets.all(2),
-                  decoration: BoxDecoration(
-                    color: Colors.black38,
-                    borderRadius: BorderRadius.circular(18),
-                    border: Border.all(color: Colors.white12),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      _buildViewerModeButton(
-                        mode: 0,
-                        icon: Icons.picture_as_pdf_rounded,
-                        label: 'PDF',
-                      ),
-                      _buildViewerModeButton(
-                        mode: 1,
-                        icon: Icons.subject_rounded,
-                        label: 'Texto',
-                      ),
-                    ],
-                  ),
+                  tooltip: 'Subrayado sincronizado activo',
+                  onPressed: () {
+                    final targetPage = _findBestPdfPageForActiveSegment(_totalPdfPages);
+                    if (_viewerMode == 0 && _totalPdfPages > 0) {
+                      _isProgrammaticPageTurn = true;
+                      _pdfPageController
+                          ?.animateToPage(
+                            targetPage,
+                            duration: const Duration(milliseconds: 320),
+                            curve: Curves.easeOutCubic,
+                          )
+                          .whenComplete(() => _isProgrammaticPageTurn = false);
+                    }
+                  },
                 ),
                 IconButton(
                   icon: const Icon(Icons.format_list_bulleted_rounded, color: Colors.white70),
-                  tooltip: 'Capítulos y Páginas',
+                  tooltip: 'Capítulos',
                   onPressed: _showChapterSelector,
                 ),
               ],
             ),
       body: Column(
         children: [
-          // Solo mostramos este banner superior si el usuario se adelantó o atrasó a otra página distinta del audio
-          if (!_immersiveFullscreen &&
-              (isViewingDifferentPdfPage || isViewingDifferentTextChapter))
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-              decoration: const BoxDecoration(
-                color: Color(0xFF221C14),
-                border: Border(bottom: BorderSide(color: Color(0x44F5A623))),
-              ),
-              child: Row(
-                children: [
-                  const Icon(Icons.graphic_eq_rounded, size: 17, color: Color(0xFFF5A623)),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: Text(
-                      _viewerMode == 0 && _totalPdfPages > 0
-                          ? 'Audio sonando en Pág. ${_audioSyncedPdfPage + 1} (${audioCh.title})'
-                          : 'Audio en: ${audioCh.title} (Párr. ${_liveAudioSegmentIndex + 1})',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 11.5,
-                        fontWeight: FontWeight.w600,
-                      ),
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  const SizedBox(width: 6),
-                  FilledButton.tonalIcon(
-                    style: FilledButton.styleFrom(
-                      backgroundColor: const Color(0xFFF5A623).withValues(alpha: 0.22),
-                      foregroundColor: const Color(0xFFF5A623),
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      minimumSize: Size.zero,
-                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                    ),
-                    onPressed: _jumpToAudioPosition,
-                    icon: const Icon(Icons.my_location_rounded, size: 13),
-                    label: Text(
-                      _viewerMode == 0 && _totalPdfPages > 0
-                          ? 'Volver a Pág. ${_audioSyncedPdfPage + 1}'
-                          : 'Ir al audio',
-                      style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
-                    ),
-                  ),
-                ],
-              ),
-            ),
           Expanded(
             child: _viewerMode == 0
-                ? _buildPdfOriginalView()
+                ? _buildPdfOriginalWithLiveHighlight()
                 : _buildTextReader(currentCh),
           ),
-          if (!_immersiveFullscreen) _buildBottomBar(currentCh),
+          if (!_immersiveFullscreen) _buildAmorFatiStyleBottomControls(),
         ],
       ),
     );
   }
 
-  Widget _buildViewerModeButton({
-    required int mode,
-    required IconData icon,
-    required String label,
-  }) {
-    final bool selected = _viewerMode == mode;
-    return GestureDetector(
-      onTap: () {
-        setState(() => _viewerMode = mode);
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
-        decoration: BoxDecoration(
-          color: selected ? const Color(0xFFF5A623) : Colors.transparent,
-          borderRadius: BorderRadius.circular(14),
-        ),
-        child: Row(
-          children: [
-            Icon(icon, size: 13.5, color: selected ? Colors.black : Colors.white70),
-            const SizedBox(width: 4),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 11.5,
-                fontWeight: FontWeight.w800,
-                color: selected ? Colors.black : Colors.white70,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildPdfOriginalView() {
+  Widget _buildPdfOriginalWithLiveHighlight() {
     if (_isLoadingPdfPage) {
       return const Center(
         child: Column(
@@ -911,7 +1088,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
             CircularProgressIndicator(color: Color(0xFFF5A623)),
             SizedBox(height: 12),
             Text(
-              'Renderizando páginas e imágenes originales del PDF...',
+              'Preparando páginas y subrayado inteligente del PDF...',
               style: TextStyle(color: Colors.white70, fontSize: 13),
             ),
           ],
@@ -940,17 +1117,15 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                 ),
                 const SizedBox(height: 14),
                 const Text(
-                  'Ver PDF Original con Imágenes y Gráficos',
+                  'Ver PDF Original con Subrayado en Vivo',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontWeight: FontWeight.w800, fontSize: 17),
                 ),
                 const SizedBox(height: 8),
-                Text(
-                  widget.book.fileType == 'epub'
-                      ? 'Este libro fue cargado en formato EPUB. Si tenés también la versión en PDF, podés vincularla acá o leerlo en la pestaña Texto.'
-                      : 'Este libro fue importado antes de activar el guardado de páginas originales. Seleccioná el archivo PDF una sola vez para ver todas sus páginas e imágenes sincronizadas con el audio.',
+                const Text(
+                  'Seleccioná el archivo PDF una sola vez para ver sus páginas originales con subrayado sincronizado palabra por palabra.',
                   textAlign: TextAlign.center,
-                  style: const TextStyle(color: Colors.white60, fontSize: 13, height: 1.4),
+                  style: TextStyle(color: Colors.white60, fontSize: 13, height: 1.4),
                 ),
                 const SizedBox(height: 20),
                 FilledButton.icon(
@@ -967,14 +1142,6 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                     style: TextStyle(fontWeight: FontWeight.w800),
                   ),
                 ),
-                const SizedBox(height: 10),
-                TextButton(
-                  onPressed: () => setState(() => _viewerMode = 1),
-                  child: const Text(
-                    'Ver en Modo Texto Sincronizado',
-                    style: TextStyle(color: Colors.white70),
-                  ),
-                ),
               ],
             ),
           ),
@@ -982,67 +1149,99 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       );
     }
 
-    final bool isOnSyncedPage = _currentPdfPage == _audioSyncedPdfPage;
-    final String cardSnippet = isOnSyncedPage
-        ? _getLiveAudioSnippetText()
-        : _getPreviewTextForPdfPage(_currentPdfPage);
-    final pageChapterInfo = _resolveChapterAndSegmentsForPdfPage(_currentPdfPage);
-    final liveAudioCh = widget.book.chapters[
-        _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1)];
-
     return Stack(
       children: [
-        GestureDetector(
-          onTap: () {
+        PageView.builder(
+          controller: _pdfPageController,
+          itemCount: _totalPdfPages,
+          onPageChanged: (pageIdx) {
             setState(() {
-              _immersiveFullscreen = !_immersiveFullscreen;
+              _currentPdfPage = pageIdx;
             });
-          },
-          child: PageView.builder(
-            controller: _pdfPageController,
-            itemCount: _totalPdfPages,
-            onPageChanged: (pageIdx) {
-              setState(() {
-                _currentPdfPage = pageIdx;
-                _autoFollowAudio = (pageIdx == _audioSyncedPdfPage);
+            _preloadPdfPages([pageIdx - 1, pageIdx + 1, pageIdx + 2]);
+
+            // Si el usuario adelantó o retrocedió la página manualmente, el audio salta automáticamente
+            // hasta esa página después de una brevísima pausa de 320ms para que pueda hojear fluido.
+            if (!_isProgrammaticPageTurn && pageIdx != _audioSyncedPdfPage) {
+              _pageTurnDebounceTimer?.cancel();
+              _pageTurnDebounceTimer = Timer(const Duration(milliseconds: 340), () {
+                if (mounted && _currentPdfPage == pageIdx) {
+                  _seekAudioToPdfPage(pageIdx);
+                }
               });
-              _preloadPdfPages([pageIdx - 1, pageIdx + 1, pageIdx + 2]);
-            },
-            itemBuilder: (context, pageIdx) {
-              final bytes = _pdfPageCache[pageIdx];
-              if (bytes == null) {
-                _loadPdfPage(pageIdx);
-                return const Center(
-                  child: CircularProgressIndicator(color: Color(0xFFF5A623)),
-                );
-              }
-              return InteractiveViewer(
-                minScale: 1.0,
-                maxScale: 5.0,
-                child: Center(
-                  child: Padding(
-                    padding: EdgeInsets.fromLTRB(
-                      4,
-                      4,
-                      4,
-                      _immersiveFullscreen ? 12 : 84,
-                    ),
-                    child: ClipRRect(
-                      borderRadius: BorderRadius.circular(6),
-                      child: _applyPdfThemeFilter(
-                        Image.memory(
-                          bytes,
-                          fit: BoxFit.contain,
+            }
+          },
+          itemBuilder: (context, pageIdx) {
+            final bytes = _pdfPageCache[pageIdx];
+            if (bytes == null) {
+              _loadPdfPage(pageIdx);
+              return const Center(
+                child: CircularProgressIndicator(color: Color(0xFFF5A623)),
+              );
+            }
+
+            final overlay = _ensurePageOverlayExtracted(pageIdx);
+            final highlights = _computeActiveHighlightRectsForPage(pageIdx);
+            final bool isDarkTheme = _pdfColorTheme == 2;
+
+            return InteractiveViewer(
+              minScale: 1.0,
+              maxScale: 4.5,
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final boxSize = Size(constraints.maxWidth, constraints.maxHeight);
+                  final double pageAspect = overlay?.aspectRatio ?? 0.707;
+                  final double boxAspect = boxSize.width / max(1.0, boxSize.height);
+
+                  double drawnW;
+                  double drawnH;
+                  if (boxAspect > pageAspect) {
+                    drawnH = boxSize.height;
+                    drawnW = drawnH * pageAspect;
+                  } else {
+                    drawnW = boxSize.width;
+                    drawnH = drawnW / pageAspect;
+                  }
+
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTapUp: (details) => _onTapPdfPagePosition(details, boxSize, pageIdx),
+                    child: Center(
+                      child: SizedBox(
+                        width: drawnW,
+                        height: drawnH,
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            // 1. Hoja original del PDF
+                            _applyPdfThemeFilter(
+                              Image.memory(
+                                bytes,
+                                fit: BoxFit.fill,
+                              ),
+                            ),
+                            // 2. Capa de subrayado sincronizado en vivo con el tono dorado de AudioMind (#F5A623)
+                            if (highlights.activeLineRects.isNotEmpty ||
+                                highlights.activeWordRect != null)
+                              IgnorePointer(
+                                child: CustomPaint(
+                                  painter: _PdfLiveHighlightPainter(
+                                    lineNormRects: highlights.activeLineRects,
+                                    wordNormRect: highlights.activeWordRect,
+                                    isDarkPageTheme: isDarkTheme,
+                                  ),
+                                ),
+                              ),
+                          ],
                         ),
                       ),
                     ),
-                  ),
-                ),
-              );
-            },
-          ),
+                  );
+                },
+              ),
+            );
+          },
         ),
-        // Botón flotante para salir de pantalla completa cuando está en modo inmersivo
         if (_immersiveFullscreen)
           Positioned(
             top: MediaQuery.of(context).padding.top + 8,
@@ -1054,123 +1253,245 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
               child: const Icon(Icons.fullscreen_exit_rounded),
             ),
           ),
-        // Panel flotante inferior en vivo: muestra el párrafo que suena o permite narrar la página explorada / elegir párrafo exacto
-        if (!_immersiveFullscreen)
-          Positioned(
-            left: 10,
-            right: 10,
-            bottom: 8,
-            child: GestureDetector(
-              onTap: () => _showPageParagraphPickerModal(_currentPdfPage),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 9),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF151310).withValues(alpha: 0.95),
-                  borderRadius: BorderRadius.circular(16),
-                  border: Border.all(
-                    color: isOnSyncedPage
-                        ? const Color(0xFFF5A623)
-                        : Colors.white24,
-                    width: 1.2,
-                  ),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withValues(alpha: 0.65),
-                      blurRadius: 12,
-                      offset: const Offset(0, 4),
-                    ),
-                  ],
-                ),
+      ],
+    );
+  }
+
+  /// Controles inferiores minimalistas inspirados en la captura de referencia (Mini-reproductor flotante + barra de iconos limpia)
+  Widget _buildAmorFatiStyleBottomControls() {
+    final liveAudioCh = widget.book.chapters[
+        _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1)];
+    final elapsed = _activeChapterElapsed;
+    final total = _activeChapterTotal;
+    final remaining = Duration(seconds: max(0, total.inSeconds - elapsed.inSeconds));
+    final double progress = (elapsed.inSeconds / max(1, total.inSeconds)).clamp(0.0, 1.0);
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFF1A1B1F),
+        border: Border(top: BorderSide(color: Colors.white10)),
+      ),
+      child: SafeArea(
+        top: false,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Deslizador rápido de páginas del PDF (se despliega al tocar el icono de deslizador)
+            if (_showPageSliderBar && _viewerMode == 0 && _totalPdfPages > 0)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(14, 8, 14, 0),
                 child: Row(
                   children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Row(
-                            children: [
-                              Icon(
-                                isOnSyncedPage
-                                    ? Icons.graphic_eq_rounded
-                                    : Icons.menu_book_rounded,
-                                size: 14,
-                                color: const Color(0xFFF5A623),
-                              ),
-                              const SizedBox(width: 5),
-                              Expanded(
-                                child: Text(
-                                  isOnSyncedPage
-                                      ? 'Narrando en vivo (Pág. ${_currentPdfPage + 1} • Párr. ${_liveAudioSegmentIndex + 1}/${max(1, liveAudioCh.segments.length)}):'
-                                      : 'Pág. ${_currentPdfPage + 1} (${pageChapterInfo.chapter.title}) • Tocá para elegir párrafo:',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: const TextStyle(
-                                    color: Color(0xFFF5A623),
-                                    fontSize: 11,
-                                    fontWeight: FontWeight.w800,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 3),
-                          Text(
-                            cardSnippet,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                              height: 1.28,
-                            ),
-                          ),
-                        ],
+                    Text(
+                      'Pág. ${_currentPdfPage + 1}',
+                      style: const TextStyle(
+                        color: Color(0xFFF5A623),
+                        fontSize: 12,
+                        fontWeight: FontWeight.w700,
                       ),
                     ),
-                    const SizedBox(width: 8),
-                    if (!isOnSyncedPage)
-                      FilledButton.icon(
-                        style: FilledButton.styleFrom(
-                          backgroundColor: const Color(0xFFF5A623),
-                          foregroundColor: Colors.black,
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                          minimumSize: Size.zero,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
+                    Expanded(
+                      child: SliderTheme(
+                        data: SliderTheme.of(context).copyWith(
+                          trackHeight: 3.5,
+                          thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6.5),
+                          activeTrackColor: const Color(0xFFF5A623),
+                          inactiveTrackColor: Colors.white24,
+                          thumbColor: Colors.white,
                         ),
-                        onPressed: () => _playAudioFromPdfPage(_currentPdfPage),
-                        icon: const Icon(Icons.play_arrow_rounded, size: 16),
-                        label: Text(
-                          'Narrar Pág. ${_currentPdfPage + 1}',
-                          style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
-                        ),
-                      )
-                    else
-                      OutlinedButton.icon(
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: const Color(0xFFF5A623),
-                          side: const BorderSide(color: Color(0x66F5A623)),
-                          padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 7),
-                          minimumSize: Size.zero,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                        onPressed: () => _showPageParagraphPickerModal(_currentPdfPage),
-                        icon: const Icon(Icons.format_list_numbered_rounded, size: 15),
-                        label: const Text(
-                          'Párrafos',
-                          style: TextStyle(fontSize: 11, fontWeight: FontWeight.w800),
+                        child: Slider(
+                          value: _currentPdfPage
+                              .toDouble()
+                              .clamp(0.0, max(0.0, _totalPdfPages - 1.0)),
+                          min: 0.0,
+                          max: max(0.0, _totalPdfPages - 1.0),
+                          onChanged: (val) {
+                            final p = val.round();
+                            _pdfPageController?.jumpToPage(p);
+                          },
                         ),
                       ),
+                    ),
+                    Text(
+                      '$_totalPdfPages',
+                      style: const TextStyle(color: Colors.white54, fontSize: 12),
+                    ),
                   ],
                 ),
               ),
+            // Mini-reproductor flotante compacto (Portada + Título + Tiempo 0:05 • -0:22 + ⏮ ⏸ ⏭ + Barra dorada en la base)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 12, 6),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF282A30),
+                    borderRadius: BorderRadius.circular(18),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(10, 8, 8, 8),
+                        child: Row(
+                          children: [
+                            BookCoverWidget(
+                              book: widget.book,
+                              width: 42,
+                              height: 42,
+                              borderRadius: 8,
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    liveAudioCh.title,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 13.5,
+                                      fontWeight: FontWeight.w700,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    '${TextSanitizer.formatDuration(elapsed)}  •  -${TextSanitizer.formatDuration(remaining)}  (Pág. ${_audioSyncedPdfPage + 1})',
+                                    style: const TextStyle(
+                                      color: Colors.white60,
+                                      fontSize: 11.5,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
+                                Icons.skip_previous_rounded,
+                                color: Colors.white,
+                                size: 26,
+                              ),
+                              tooltip: 'Párrafo anterior',
+                              onPressed: () => _skipParagraph(-1),
+                            ),
+                            GestureDetector(
+                              onTap: () {
+                                if (_isPlaying) {
+                                  NativeChannelService.pauseLoFi();
+                                  widget.player.pause();
+                                } else {
+                                  widget.player.play();
+                                  NativeChannelService.playLoFi();
+                                }
+                              },
+                              child: Container(
+                                width: 40,
+                                height: 40,
+                                margin: const EdgeInsets.symmetric(horizontal: 4),
+                                decoration: const BoxDecoration(
+                                  color: Color(0xFFF5A623),
+                                  shape: BoxShape.circle,
+                                ),
+                                child: Icon(
+                                  _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                                  color: Colors.black,
+                                  size: 24,
+                                ),
+                              ),
+                            ),
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              icon: const Icon(
+                                Icons.skip_next_rounded,
+                                color: Colors.white,
+                                size: 26,
+                              ),
+                              tooltip: 'Siguiente párrafo',
+                              onPressed: () => _skipParagraph(1),
+                            ),
+                          ],
+                        ),
+                      ),
+                      // Línea de progreso dorada integrada en el borde inferior de la píldora
+                      LinearProgressIndicator(
+                        value: progress,
+                        minHeight: 3,
+                        backgroundColor: Colors.white12,
+                        valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFF5A623)),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ),
-          ),
-      ],
+            // Barra de iconos inferior estilo lector profesional (Capítulos | Brillo/Tema | Deslizador Págs | Modo Texto 'A' | Modo Audio 🎧)
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 2),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.format_list_bulleted_rounded, color: Colors.white70),
+                    tooltip: 'Capítulos',
+                    onPressed: _showChapterSelector,
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      _pdfColorTheme == 0
+                          ? Icons.wb_sunny_outlined
+                          : (_pdfColorTheme == 1
+                              ? Icons.auto_awesome_mosaic_outlined
+                              : Icons.dark_mode_rounded),
+                      color: _pdfColorTheme == 0 ? Colors.white70 : const Color(0xFFF5A623),
+                    ),
+                    tooltip: 'Tema de página (Día / Sepia / Noche)',
+                    onPressed: () {
+                      setState(() {
+                        _pdfColorTheme = (_pdfColorTheme + 1) % 3;
+                      });
+                    },
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      Icons.tune_rounded,
+                      color: _showPageSliderBar ? const Color(0xFFF5A623) : Colors.white70,
+                    ),
+                    tooltip: 'Deslizador de páginas',
+                    onPressed: () {
+                      setState(() {
+                        _showPageSliderBar = !_showPageSliderBar;
+                      });
+                    },
+                  ),
+                  IconButton(
+                    icon: Icon(
+                      Icons.text_fields_rounded,
+                      color: _viewerMode == 1 ? const Color(0xFFF5A623) : Colors.white70,
+                    ),
+                    tooltip: 'Alternar PDF Original / Modo Texto',
+                    onPressed: () {
+                      setState(() {
+                        _viewerMode = _viewerMode == 0 ? 1 : 0;
+                      });
+                    },
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.headphones_rounded, color: Color(0xFFF5A623)),
+                    tooltip: 'Volver al reproductor principal',
+                    onPressed: () => Navigator.pop(context),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1233,69 +1554,33 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                   setState(() {
                     _liveAudioChapterIndex = _activeChapterIndex;
                     _liveAudioSegmentIndex = sIdx;
-                    _autoFollowAudio = true;
+                    _livePosition = Duration.zero;
                   });
                   widget.onSeekToPosition?.call(_activeChapterIndex, sIdx);
-                  ScaffoldMessenger.of(context).clearSnackBars();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    SnackBar(
-                      content: Text(
-                        '🔊 Narrando desde párrafo ${sIdx + 1}...',
-                        style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.black),
-                      ),
-                      duration: const Duration(milliseconds: 1400),
-                      behavior: SnackBarBehavior.floating,
-                      backgroundColor: const Color(0xFFF5A623),
-                    ),
-                  );
                 },
                 child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 240),
+                  duration: const Duration(milliseconds: 220),
                   margin: const EdgeInsets.only(bottom: 16),
-                  padding: EdgeInsets.all(isCurrentAudioSegment ? 16 : 0),
+                  padding: EdgeInsets.all(isCurrentAudioSegment ? 14 : 0),
                   decoration: BoxDecoration(
                     color: isCurrentAudioSegment
-                        ? const Color(0xFF261E14).withValues(alpha: 0.95)
+                        ? const Color(0xFFF5A623).withValues(alpha: 0.16)
                         : Colors.transparent,
-                    borderRadius: BorderRadius.circular(14),
+                    borderRadius: BorderRadius.circular(12),
                     border: isCurrentAudioSegment
-                        ? Border.all(color: const Color(0xFFF5A623), width: 1.4)
+                        ? Border.all(color: const Color(0xFFF5A623), width: 1.3)
                         : null,
                   ),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (isCurrentAudioSegment)
-                        const Padding(
-                          padding: EdgeInsets.only(bottom: 6),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.volume_up_rounded, size: 16, color: Color(0xFFF5A623)),
-                              SizedBox(width: 6),
-                              Text(
-                                'Narrando ahora en vivo (Tocá otro párrafo para saltar)',
-                                style: TextStyle(
-                                  color: Color(0xFFF5A623),
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                ),
-                              ),
-                            ],
-                          ),
-                        ),
-                      Text(
-                        text,
-                        style: TextStyle(
-                          fontSize: _fontSize,
-                          height: 1.68,
-                          color: isCurrentAudioSegment
-                              ? Colors.white
-                              : Colors.white.withValues(alpha: 0.88),
-                          fontWeight: isCurrentAudioSegment ? FontWeight.w500 : FontWeight.w400,
-                        ),
-                      ),
-                    ],
+                  child: Text(
+                    text,
+                    style: TextStyle(
+                      fontSize: _fontSize,
+                      height: 1.65,
+                      color: isCurrentAudioSegment
+                          ? Colors.white
+                          : Colors.white.withValues(alpha: 0.85),
+                      fontWeight: isCurrentAudioSegment ? FontWeight.w600 : FontWeight.w400,
+                    ),
                   ),
                 ),
               );
@@ -1306,110 +1591,68 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     );
   }
 
-  Widget _buildBottomBar(ChapterItem currentCh) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
-      decoration: const BoxDecoration(
-        color: Color(0xFF16181D),
-        border: Border(top: BorderSide(color: Colors.white12)),
-      ),
-      child: SafeArea(
-        top: false,
-        child: Row(
-          children: [
-            Expanded(
-              child: _viewerMode == 0 && _totalPdfPages > 0
-                  ? Row(
-                      children: [
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          icon: const Icon(Icons.chevron_left_rounded, color: Colors.white70),
-                          onPressed: _currentPdfPage > 0
-                              ? () => _pdfPageController?.previousPage(
-                                    duration: const Duration(milliseconds: 220),
-                                    curve: Curves.easeOut,
-                                  )
-                              : null,
-                        ),
-                        Expanded(
-                          child: SliderTheme(
-                            data: SliderTheme.of(context).copyWith(
-                              trackHeight: 3.5,
-                              thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6.5),
-                              activeTrackColor: const Color(0xFFF5A623),
-                              thumbColor: Colors.white,
-                            ),
-                            child: Slider(
-                              value: _currentPdfPage
-                                  .toDouble()
-                                  .clamp(0.0, max(0.0, _totalPdfPages - 1.0)),
-                              min: 0.0,
-                              max: max(0.0, _totalPdfPages - 1.0),
-                              onChanged: (val) {
-                                final p = val.round();
-                                _pdfPageController?.jumpToPage(p);
-                              },
-                            ),
-                          ),
-                        ),
-                        IconButton(
-                          visualDensity: VisualDensity.compact,
-                          icon: const Icon(Icons.chevron_right_rounded, color: Colors.white70),
-                          onPressed: _currentPdfPage + 1 < _totalPdfPages
-                              ? () => _pdfPageController?.nextPage(
-                                    duration: const Duration(milliseconds: 220),
-                                    curve: Curves.easeOut,
-                                  )
-                              : null,
-                        ),
-                      ],
-                    )
-                  : Row(
-                      children: [
-                        IconButton(
-                          icon: const Icon(Icons.skip_previous_rounded, color: Colors.white70),
-                          onPressed: _activeChapterIndex > 0
-                              ? () => setState(() => _activeChapterIndex--)
-                              : null,
-                        ),
-                        Expanded(
-                          child: Text(
-                            currentCh.title,
-                            textAlign: TextAlign.center,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                          ),
-                        ),
-                        IconButton(
-                          icon: const Icon(Icons.skip_next_rounded, color: Colors.white70),
-                          onPressed: _activeChapterIndex + 1 < widget.book.chapters.length
-                              ? () => setState(() => _activeChapterIndex++)
-                              : null,
-                        ),
-                      ],
-                    ),
+  void _showJumpToPageDialog() {
+    if (_totalPdfPages <= 0) return;
+    final controller = TextEditingController(text: '${_currentPdfPage + 1}');
+    showDialog(
+      context: context,
+      builder: (ctx) {
+        return AlertDialog(
+          backgroundColor: const Color(0xFF1B1D24),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+          title: const Text(
+            'Ir a la página (y narrar desde ahí)',
+            style: TextStyle(fontWeight: FontWeight.w800, fontSize: 16),
+          ),
+          content: TextField(
+            controller: controller,
+            keyboardType: TextInputType.number,
+            autofocus: true,
+            style: const TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold),
+            decoration: InputDecoration(
+              hintText: '1 - $_totalPdfPages',
+              suffixText: 'de $_totalPdfPages',
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: Color(0xFFF5A623)),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: Colors.white24),
+              ),
             ),
-            const SizedBox(width: 6),
-            IconButton.filled(
-              style: IconButton.styleFrom(
+            onSubmitted: (_) {
+              final pageNum = int.tryParse(controller.text.trim());
+              Navigator.pop(ctx);
+              if (pageNum != null) {
+                final target = (pageNum - 1).clamp(0, _totalPdfPages - 1);
+                _pdfPageController?.jumpToPage(target);
+              }
+            },
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar', style: TextStyle(color: Colors.white54)),
+            ),
+            FilledButton(
+              style: FilledButton.styleFrom(
                 backgroundColor: const Color(0xFFF5A623),
                 foregroundColor: Colors.black,
               ),
-              icon: Icon(_isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded),
               onPressed: () {
-                if (_isPlaying) {
-                  NativeChannelService.pauseLoFi();
-                  widget.player.pause();
-                } else {
-                  widget.player.play();
-                  NativeChannelService.playLoFi();
+                final pageNum = int.tryParse(controller.text.trim());
+                Navigator.pop(ctx);
+                if (pageNum != null) {
+                  final target = (pageNum - 1).clamp(0, _totalPdfPages - 1);
+                  _pdfPageController?.jumpToPage(target);
                 }
               },
+              child: const Text('Ir y Narrar', style: TextStyle(fontWeight: FontWeight.bold)),
             ),
           ],
-        ),
-      ),
+        );
+      },
     );
   }
 
@@ -1451,33 +1694,32 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                 ...widget.book.chapters.asMap().entries.map((entry) {
                   final idx = entry.key;
                   final ch = entry.value;
-                  final isCurrent = idx == _activeChapterIndex;
                   final isAudioHere = idx == _liveAudioChapterIndex;
                   return ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: CircleAvatar(
                       radius: 15,
                       backgroundColor:
-                          isCurrent ? const Color(0xFFF5A623) : const Color(0xFF2C2D32),
+                          isAudioHere ? const Color(0xFFF5A623) : const Color(0xFF2C2D32),
                       child: Text(
                         ch.id.toString(),
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.bold,
-                          color: isCurrent ? Colors.black : Colors.white70,
+                          color: isAudioHere ? Colors.black : Colors.white70,
                         ),
                       ),
                     ),
                     title: Text(
                       ch.title,
                       style: TextStyle(
-                        fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
-                        color: isCurrent ? const Color(0xFFF5A623) : Colors.white,
+                        fontWeight: isAudioHere ? FontWeight.bold : FontWeight.normal,
+                        color: isAudioHere ? const Color(0xFFF5A623) : Colors.white,
                       ),
                     ),
                     subtitle: Text(
                       isAudioHere
-                          ? '🔊 Sonando acá • ${ch.subtitle} • ${ch.durationText}'
+                          ? '🔊 Narrando acá • ${ch.subtitle} • ${ch.durationText}'
                           : '${ch.subtitle} • ${ch.durationText}',
                       style: TextStyle(
                         color: isAudioHere ? const Color(0xFFF5A623) : Colors.white54,
@@ -1494,6 +1736,8 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                             range[0].clamp(0, _totalPdfPages - 1),
                           );
                         }
+                      } else {
+                        widget.onSeekToPosition?.call(idx, 0);
                       }
                     },
                   );
@@ -1504,5 +1748,75 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
         );
       },
     );
+  }
+}
+
+/// Pinta el subrayado dorado suave sobre las líneas del párrafo actual y resalta con más intensidad la palabra exacta que se está pronunciando
+class _PdfLiveHighlightPainter extends CustomPainter {
+  final List<Rect> lineNormRects;
+  final Rect? wordNormRect;
+  final bool isDarkPageTheme;
+
+  const _PdfLiveHighlightPainter({
+    required this.lineNormRects,
+    required this.wordNormRect,
+    required this.isDarkPageTheme,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    // 1. Subrayado suave del párrafo/bloque de líneas actual en el tono dorado de AudioMind (#F5A623)
+    final Paint linePaint = Paint()
+      ..color = const Color(0xFFF5A623).withValues(alpha: isDarkPageTheme ? 0.24 : 0.25)
+      ..style = PaintingStyle.fill;
+
+    for (final norm in lineNormRects) {
+      final rect = Rect.fromLTWH(
+        norm.left * size.width - 2,
+        norm.top * size.height - 1,
+        norm.width * size.width + 4,
+        norm.height * size.height + 2,
+      );
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(rect, const Radius.circular(3.5)),
+        linePaint,
+      );
+    }
+
+    // 2. Resaltado más intenso para la palabra exacta que está diciendo el narrador en este milisegundo
+    if (wordNormRect != null) {
+      final wRect = Rect.fromLTWH(
+        wordNormRect!.left * size.width - 2.5,
+        wordNormRect!.top * size.height - 1.5,
+        wordNormRect!.width * size.width + 5,
+        wordNormRect!.height * size.height + 3,
+      );
+
+      final Paint wordFillPaint = Paint()
+        ..color = const Color(0xFFF5A623).withValues(alpha: isDarkPageTheme ? 0.50 : 0.55)
+        ..style = PaintingStyle.fill;
+
+      final Paint wordUnderlinePaint = Paint()
+        ..color = const Color(0xFFD98200)
+        ..strokeWidth = 2.0
+        ..style = PaintingStyle.stroke;
+
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(wRect, const Radius.circular(4)),
+        wordFillPaint,
+      );
+      canvas.drawLine(
+        Offset(wRect.left + 1, wRect.bottom),
+        Offset(wRect.right - 1, wRect.bottom),
+        wordUnderlinePaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _PdfLiveHighlightPainter oldDelegate) {
+    return oldDelegate.wordNormRect != wordNormRect ||
+        oldDelegate.lineNormRects != lineNormRects ||
+        oldDelegate.isDarkPageTheme != isDarkPageTheme;
   }
 }

@@ -343,7 +343,6 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           estimatedPage,
           if (estimatedPage + 1 < totalPages) estimatedPage + 1,
           if (estimatedPage - 1 >= 0) estimatedPage - 1,
-          if (range != null) ...List.generate(range[1] - range[0] + 1, (i) => range[0] + i),
         };
 
         int bestPage = estimatedPage;
@@ -1160,11 +1159,11 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
             });
             _preloadPdfPages([pageIdx - 1, pageIdx + 1, pageIdx + 2]);
 
-            // Si el usuario adelantó o retrocedió la página manualmente, el audio salta automáticamente
-            // hasta esa página después de una brevísima pausa de 320ms para que pueda hojear fluido.
+            // Si el usuario adelantó o retrocedió la página manualmente, espera 600ms a que termine de hojear
+            // y salta el audio suavemente a esa página sin interrumpir mientras desliza.
             if (!_isProgrammaticPageTurn && pageIdx != _audioSyncedPdfPage) {
               _pageTurnDebounceTimer?.cancel();
-              _pageTurnDebounceTimer = Timer(const Duration(milliseconds: 340), () {
+              _pageTurnDebounceTimer = Timer(const Duration(milliseconds: 600), () {
                 if (mounted && _currentPdfPage == pageIdx) {
                   _seekAudioToPdfPage(pageIdx);
                 }

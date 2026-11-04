@@ -261,7 +261,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
 
     widget.onProgressUpdated?.call(chapter, safeSeg, segs.length, initialSeekMs);
-    await _playSegmentAtIndex(safeSeg, gen, seekToMs: initialSeekMs);
+    await _playSegmentAtIndex(safeSeg, gen, initialSeekMs);
   }
 
   void _scrollToCurrentSegment(int index) {
@@ -283,83 +283,51 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
   }
 
-  Future<void> _playSegmentAtIndex(int index, int gen, {int seekToMs = 0}) async {
-    if (gen != _synthesisGeneration || !mounted) return;
+  Future<void> _playSegmentAtIndex(int index, [int? _ignoredGen, int seekToMs = 0]) async {
+    if (!mounted) return;
     if (index < 0 || index >= _segments.length) return;
 
+    // Cada cambio de párrafo genera un token único que invalida cualquier operación anterior en vuelo
+    final int gen = ++_synthesisGeneration;
     _isHandlingCompletion = false;
+    final voiceKey = _selectedVoiceKey;
+    final chapter = _currentChapter;
+
+    // Verificar si el párrafo ya está pre-cargado en caché local (estilo YouTube Music).
+    // Si ya está en caché, NO mostramos el spinner de carga para que la transición sea 100% invisible y continua.
+    final bool alreadyCached = await _ttsService.isSegmentCached(
+      bookId: widget.book.id,
+      chapter: chapter,
+      segIdx: index,
+      voiceKey: voiceKey,
+    );
+    if (gen != _synthesisGeneration || !mounted) return;
+
     setState(() {
       _currentSegmentIndex = index;
-      _isSynthesizing = true;
+      if (!alreadyCached) {
+        _isSynthesizing = true;
+      } else {
+        _isSynthesizing = false;
+        _statusMessage = '';
+      }
     });
     widget.onProgressUpdated?.call(_currentChapter, index, _segments.length, seekToMs);
     _scrollToCurrentSegment(index);
 
-    final voiceKey = _selectedVoiceKey;
-    final chapter = _currentChapter;
-
-    // Bucle de reconexión automática: si vas viajando y se corta el 4G/LTE, NO salta de párrafo
-    // ni queda colgado para siempre; espera y reintenta automáticamente hasta que vuelve la señal.
+    // 1. Fase de Red / Caché (solo esta fase reintenta si se corta el 4G/LTE)
+    File? audioFile;
     int networkAttempt = 0;
     while (mounted && gen == _synthesisGeneration && !_userRequestedPause) {
       try {
-        final audioFile = await _ttsService.synthesizeSegment(
+        audioFile = await _ttsService.synthesizeSegment(
           bookId: widget.book.id,
           chapter: chapter,
           segIdx: index,
           text: _segments[index],
           voiceKey: voiceKey,
         );
-
-        if (gen != _synthesisGeneration || !mounted || _userRequestedPause) return;
-
-        Uri? artUri;
-        if (widget.book.coverImagePath != null &&
-            await File(widget.book.coverImagePath!).exists()) {
-          artUri = Uri.file(widget.book.coverImagePath!);
-        } else if (widget.book.coverUrl != null) {
-          artUri = Uri.parse(widget.book.coverUrl!);
-        }
-
-        await widget.player.setAudioSource(
-          AudioSource.uri(
-            Uri.file(audioFile.path),
-            tag: MediaItem(
-              id: '${widget.book.id}_${chapter.id}_$index',
-              album: widget.book.title,
-              title: '${chapter.title} (${index + 1}/${_segments.length})',
-              artist: widget.book.author,
-              artUri: artUri,
-            ),
-          ),
-        );
-
-        if (seekToMs > 500) {
-          await widget.player.seek(Duration(milliseconds: seekToMs));
-        }
-
-        await widget.player.setSpeed(_playbackSpeed);
-        try {
-          await widget.player.setPitch(1.0);
-        } catch (_) {}
-
-        if (!mounted || gen != _synthesisGeneration) return;
-        setState(() {
-          _isSynthesizing = false;
-          _statusMessage = '';
-        });
-
-        if (_userRequestedPause) return;
-
-        await widget.player.play();
-        if (_ambientVolume > 0 && !_userRequestedPause) {
-          NativeChannelService.setLoFiVolume(_ambientVolume);
-          NativeChannelService.playLoFi();
-        }
-
-        // Iniciar pre-descarga inteligente en caché estilo YouTube Music
-        _startSequentialPrefetch(chapter, index + 1, voiceKey, gen);
-        return;
+        break;
       } catch (e) {
         networkAttempt++;
         if (!mounted || gen != _synthesisGeneration || _userRequestedPause) return;
@@ -370,9 +338,71 @@ class _PlayerScreenState extends State<PlayerScreen>
               'Señal inestable • Reconectando automáticamente (intento $networkAttempt)...';
         });
 
-        // Espera progresiva corta (2.5s) antes de volver a probar si regresó el LTE
-        await Future<void>.delayed(const Duration(milliseconds: 2500));
+        await Future<void>.delayed(const Duration(milliseconds: 2200));
       }
+    }
+
+    if (audioFile == null || gen != _synthesisGeneration || !mounted || _userRequestedPause) {
+      return;
+    }
+
+    // 2. Arrancar INMEDIATAMENTE la pre-descarga en caché de los siguientes párrafos en segundo plano
+    // mientras empieza a sonar este párrafo (así el próximo párrafo ya estará en disco antes de que termine este).
+    _startSequentialPrefetch(chapter, index + 1, voiceKey, gen);
+
+    // 3. Fase de Reproductor Local (aislada de errores de red: si el usuario cambia de página o párrafo rápido,
+    // just_audio lanza PlayerInterruptedException que debe ignorarse silenciosamente).
+    try {
+      Uri? artUri;
+      if (widget.book.coverImagePath != null &&
+          await File(widget.book.coverImagePath!).exists()) {
+        artUri = Uri.file(widget.book.coverImagePath!);
+      } else if (widget.book.coverUrl != null) {
+        artUri = Uri.parse(widget.book.coverUrl!);
+      }
+
+      if (gen != _synthesisGeneration || !mounted || _userRequestedPause) return;
+
+      await widget.player.setAudioSource(
+        AudioSource.uri(
+          Uri.file(audioFile.path),
+          tag: MediaItem(
+            id: '${widget.book.id}_${chapter.id}_$index',
+            album: widget.book.title,
+            title: '${chapter.title} (${index + 1}/${_segments.length})',
+            artist: widget.book.author,
+            artUri: artUri,
+          ),
+        ),
+      );
+
+      if (seekToMs > 500) {
+        await widget.player.seek(Duration(milliseconds: seekToMs));
+      }
+
+      await widget.player.setSpeed(_playbackSpeed);
+      try {
+        await widget.player.setPitch(1.0);
+      } catch (_) {}
+
+      if (!mounted || gen != _synthesisGeneration) return;
+      setState(() {
+        _isSynthesizing = false;
+        _statusMessage = '';
+      });
+
+      if (_userRequestedPause) return;
+
+      // IMPORTANTE: No usar `await widget.player.play()` bloqueante porque en just_audio
+      // ese Future no termina hasta que finaliza toda la pista o se interrumpe.
+      unawaited(widget.player.play().catchError((_) {}));
+
+      if (_ambientVolume > 0 && !_userRequestedPause) {
+        NativeChannelService.setLoFiVolume(_ambientVolume);
+        NativeChannelService.playLoFi();
+      }
+    } catch (_) {
+      // Interrupción normal al cambiar de párrafo o página rápidamente
     }
   }
 
@@ -389,8 +419,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     final segs = chapter.segments;
 
     for (int i = startIdx; i < min(segs.length, startIdx + 12); i++) {
-      if (gen != _synthesisGeneration ||
-          prefetchId != _prefetchGeneration ||
+      if (prefetchId != _prefetchGeneration ||
+          _currentChapter.id != chapter.id ||
           !mounted ||
           _userRequestedPause) {
         return;
@@ -416,8 +446,8 @@ class _PlayerScreenState extends State<PlayerScreen>
         final nextCh = widget.book.chapters[chIdx + 1];
         final nextSegs = nextCh.segments;
         for (int k = 0; k < min(4, nextSegs.length); k++) {
-          if (gen != _synthesisGeneration ||
-              prefetchId != _prefetchGeneration ||
+          if (prefetchId != _prefetchGeneration ||
+              _currentChapter.id != chapter.id ||
               !mounted ||
               _userRequestedPause) {
             return;
@@ -797,7 +827,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _playSegmentAtIndex(
           _currentSegmentIndex,
           ++_synthesisGeneration,
-          seekToMs: _position.inMilliseconds,
+          _position.inMilliseconds,
         );
       } else {
         widget.player.play();
@@ -1372,8 +1402,9 @@ class _PlayerScreenState extends State<PlayerScreen>
             widget.book.lastChapterIndex = chIdx;
             widget.book.lastSegmentIndex = segIdx;
             widget.book.totalSegmentsInLastChapter = max(1, targetCh.segments.length);
+            _userRequestedPause = false;
             if (targetCh.id == _currentChapter.id) {
-              _playSegmentAtIndex(segIdx, _synthesisGeneration);
+              _playSegmentAtIndex(segIdx, ++_synthesisGeneration);
             } else {
               _startChapterPlayback(targetCh, startSegment: segIdx);
             }

@@ -10,11 +10,14 @@ import '../../core/utils/text_sanitizer.dart';
 import '../../domain/models/chapter_item.dart';
 import '../../domain/models/word_timing_item.dart';
 
-/// Servicio dedicado a la síntesis neuronal Edge-TTS y caché inteligente estilo YouTube Music.
-/// Incluye timeouts estrictos para redes móviles (LTE/4G) inestables, reintentos automáticos
-/// y memoria RAM acotada (LRU) para rendimiento fluido en celulares de gama baja y media.
+/// Servicio Singleton dedicado a la síntesis neuronal Edge-TTS y caché inteligente estilo YouTube Music.
+/// Comparte en memoria los tiempos palabra por palabra entre el Reproductor y el Visor PDF en vivo.
 class TtsSynthesisService {
-  // Mapa LRU acotado a máximo 80 segmentos en RAM para no saturar celulares de gama baja/media
+  static final TtsSynthesisService _instance = TtsSynthesisService._internal();
+  factory TtsSynthesisService() => _instance;
+  TtsSynthesisService._internal();
+
+  // Mapa LRU acotado a máximo 100 segmentos en RAM para compartir timings instantáneamente con el PDF en vivo
   final LinkedHashMap<String, List<WordTimingItem>> _segmentWordTimings =
       LinkedHashMap<String, List<WordTimingItem>>();
   final Map<String, Future<File>> _inFlightSynthesis = {};
@@ -46,7 +49,7 @@ class TtsSynthesisService {
   void _putTimingsInRamCache(String key, List<WordTimingItem> timings) {
     _segmentWordTimings.remove(key);
     _segmentWordTimings[key] = timings;
-    while (_segmentWordTimings.length > 80) {
+    while (_segmentWordTimings.length > 100) {
       _segmentWordTimings.remove(_segmentWordTimings.keys.first);
     }
   }
@@ -91,7 +94,6 @@ class TtsSynthesisService {
 
   Future<File> _getSegmentFile(String bookId, String key) async {
     final docPath = await _getDocDirPath();
-    // Compatibilidad con segmentos ya guardados en docDir raíz y nueva carpeta organizada por libro
     final legacyFile = File('$docPath/$key.mp3');
     if (await legacyFile.exists()) return legacyFile;
     final bookDir = await _getBookCacheDir(bookId);
@@ -115,7 +117,7 @@ class TtsSynthesisService {
   }) async {
     final key = segmentKeyId(bookId, chapter, segIdx, voiceKey);
     final file = await _getSegmentFile(bookId, key);
-    return await file.exists() && await file.length() > 800;
+    return await file.exists() && await file.length() > 400;
   }
 
   Future<File> synthesizeSegment({
@@ -148,7 +150,7 @@ class TtsSynthesisService {
     final finalFile = await _getSegmentFile(bookId, key);
     final wordsFile = await _getSegmentWordsFile(bookId, key);
 
-    if (await finalFile.exists() && await finalFile.length() > 800) {
+    if (await finalFile.exists() && await finalFile.length() > 400) {
       if (!_segmentWordTimings.containsKey(key) && await wordsFile.exists()) {
         try {
           final rawJson = await wordsFile.readAsString();
@@ -161,9 +163,9 @@ class TtsSynthesisService {
       return finalFile;
     }
 
-    // 2. Si no está en disco, descargar en streaming con timeout estricto (evita loading infinito en LTE inestable)
+    // 2. Si no está en disco, descargar en streaming con 3 intentos rápidos e invisibles para el usuario
     Object? lastError;
-    for (int attempt = 1; attempt <= 2; attempt++) {
+    for (int attempt = 1; attempt <= 3; attempt++) {
       try {
         return await _downloadSegmentFromEdgeTts(
           finalFile: finalFile,
@@ -171,11 +173,11 @@ class TtsSynthesisService {
           key: key,
           text: text,
           voiceKey: voiceKey,
-        ).timeout(const Duration(seconds: 14));
+        ).timeout(const Duration(seconds: 15));
       } catch (e) {
         lastError = e;
-        if (attempt < 2) {
-          await Future<void>.delayed(const Duration(milliseconds: 900));
+        if (attempt < 3) {
+          await Future<void>.delayed(Duration(milliseconds: 350 * attempt));
         }
       }
     }
@@ -189,7 +191,10 @@ class TtsSynthesisService {
     required String text,
     required String voiceKey,
   }) async {
-    final cleanSpeakText = TextSanitizer.humanizeTextForNaturalSpeech(text);
+    String cleanSpeakText = TextSanitizer.humanizeTextForNaturalSpeech(text).trim();
+    if (cleanSpeakText.isEmpty) {
+      cleanSpeakText = '.';
+    }
     final tempFile = File('${finalFile.path}.tmp');
 
     final tts = Communicate(
@@ -204,8 +209,7 @@ class TtsSynthesisService {
     final audioBuilder = BytesBuilder(copy: false);
     final List<WordTimingItem> timings = [];
 
-    // Timeout de 9 segundos entre paquetes del stream: si el 4G/LTE se corta en ruta, corta rápido para poder reintentar
-    await for (final event in tts.stream().timeout(const Duration(seconds: 9))) {
+    await for (final event in tts.stream().timeout(const Duration(seconds: 10))) {
       if (event is AudioDataEvent) {
         audioBuilder.add(event.data);
       } else if (event is WordBoundaryEvent) {
@@ -222,7 +226,7 @@ class TtsSynthesisService {
     }
 
     final bytes = audioBuilder.toBytes();
-    if (bytes.length < 256) {
+    if (bytes.length < 128) {
       throw Exception('Audio incompleto recibido de la red');
     }
 

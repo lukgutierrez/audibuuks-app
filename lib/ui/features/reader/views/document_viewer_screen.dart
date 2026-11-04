@@ -941,6 +941,10 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           )
           .whenComplete(() => _isProgrammaticPageTurn = false);
     }
+    if (!_isPlaying) {
+      widget.player.play();
+      NativeChannelService.playLoFi();
+    }
   }
 
   void _preloadPdfPages(List<int> pages) {
@@ -1076,8 +1080,18 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                     borderRadius: BorderRadius.circular(16),
                     onTap: () {
                       if (!_autoFollowAudio) {
+                        // Al volver a Sincronizado, reanuda el audio y viaja a la página sincronizada
                         _jumpToAudioPosition();
+                        if (!_isPlaying) {
+                          widget.player.play();
+                          NativeChannelService.playLoFi();
+                        }
                       } else {
+                        // Al entrar a Modo Libre, pausa el audio y lofi de inmediato para que leas tranquilo sin conflicto ni lag
+                        if (_isPlaying) {
+                          widget.player.pause();
+                          NativeChannelService.pauseLoFi();
+                        }
                         setState(() => _autoFollowAudio = false);
                       }
                     },

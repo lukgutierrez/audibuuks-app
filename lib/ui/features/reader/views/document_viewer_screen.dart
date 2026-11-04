@@ -530,8 +530,31 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       }
     }
 
+    // Encontrar la línea del PDF que coincide con las primeras 4 palabras del párrafo de audio
+    final firstSegTokens = segWords.take(5).toList();
+    int startLineIdx = -1;
+    for (int i = 0; i < overlay.lines.length; i++) {
+      final lineTokens = overlay.lines[i].words.map((w) => w.cleanToken).where((t) => t.length >= 3).toList();
+      int startHits = 0;
+      for (final t in firstSegTokens) {
+        if (lineTokens.contains(t)) startHits++;
+      }
+      if (startHits >= 2 || (firstSegTokens.isNotEmpty && lineTokens.isNotEmpty && firstSegTokens.first == lineTokens.first)) {
+        startLineIdx = i;
+        break;
+      }
+    }
+
     final List<int> matchedLineIndices = [];
-    if (bestStart != -1 && maxContigHits >= 4) {
+    if (startLineIdx != -1) {
+      // Tomamos consecutivamente desde la línea exacta de inicio tantas líneas como abarque el párrafo
+      int wordsAccumulated = 0;
+      for (int k = startLineIdx; k < overlay.lines.length; k++) {
+        matchedLineIndices.add(k);
+        wordsAccumulated += overlay.lines[k].words.length;
+        if (wordsAccumulated >= segWords.length) break;
+      }
+    } else if (bestStart != -1 && maxContigHits >= 4) {
       for (int k = bestStart; k <= bestEnd; k++) {
         matchedLineIndices.add(k);
       }

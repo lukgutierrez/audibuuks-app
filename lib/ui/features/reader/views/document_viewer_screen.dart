@@ -578,24 +578,27 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
             .clamp(0, paragraphPdfWords.length - 1);
         final spokenClean = _normalizeToken(timings[eventIdx].word);
 
+      // Tolerancia: si coincide la palabra o contiene los primeros 3 caracteres clave
+      if (spokenClean.isNotEmpty) {
+        final minSearch = max(0, expectedIdx - 6);
+        final maxSearch = min(paragraphPdfWords.length - 1, expectedIdx + 6);
         int bestIdx = expectedIdx;
-        if (spokenClean.isNotEmpty) {
-          final minSearch = max(0, expectedIdx - 5);
-          final maxSearch = min(paragraphPdfWords.length - 1, expectedIdx + 5);
-          int bestDist = 999;
-          for (int k = minSearch; k <= maxSearch; k++) {
-            final candToken = paragraphPdfWords[k].cleanToken;
-            if (candToken == spokenClean ||
-                (spokenClean.length >= 4 && candToken.startsWith(spokenClean))) {
-              final dist = (k - expectedIdx).abs();
-              if (dist < bestDist) {
-                bestDist = dist;
-                bestIdx = k;
-              }
+        int bestDist = 999;
+        for (int k = minSearch; k <= maxSearch; k++) {
+          final candToken = paragraphPdfWords[k].cleanToken;
+          if (candToken == spokenClean ||
+              (spokenClean.length >= 3 && candToken.startsWith(spokenClean.substring(0, min(3, spokenClean.length))))) {
+            final dist = (k - expectedIdx).abs();
+            if (dist < bestDist) {
+              bestDist = dist;
+              bestIdx = k;
             }
           }
         }
         activeWordRect = paragraphPdfWords[bestIdx].normBounds;
+      } else {
+        activeWordRect = paragraphPdfWords[expectedIdx].normBounds;
+      }
       } else {
         final totalMs = max(1200, _liveDuration.inMilliseconds);
         final progress = (posMs / totalMs).clamp(0.0, 0.999);

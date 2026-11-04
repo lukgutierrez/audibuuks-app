@@ -6,7 +6,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/utils/text_sanitizer.dart';
 import '../../domain/models/book_item.dart';
 import '../../domain/models/chapter_item.dart';
-import '../services/cover_service.dart';
 
 /// Repositorio único de verdad para la Biblioteca, progreso ultraligero y preferencias del reproductor
 class LibraryRepository {

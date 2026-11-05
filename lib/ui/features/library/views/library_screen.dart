@@ -208,14 +208,19 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           final wantTranslate = await _askTranslateOrKeepOriginal();
           if (wantTranslate == true) {
             activeLang = 'es';
-            setState(() {
-              _processingPercent = 70;
-              _processingStatus = 'Traduciendo Capítulo 1 al español...';
-              _processingDetail = 'Listo para escuchar de inmediato';
-            });
-            if (finalChapters.isNotEmpty) {
-              final firstTranslated = await BookTranslationService.translateSingleChapter(finalChapters.first);
-              finalChapters[0] = firstTranslated;
+            // Traducir por adelantado el 50% de los capítulos en la pantalla de carga
+            final initialTarget = max(1, (finalChapters.length * 0.50).ceil());
+            for (int i = 0; i < initialTarget && i < finalChapters.length; i++) {
+              final pct = 60 + (((i + 1) / initialTarget) * 35).round();
+              if (mounted) {
+                setState(() {
+                  _processingPercent = pct.clamp(60, 95);
+                  _processingStatus = 'Traduciendo al español: Cap. ${i + 1} de $initialTarget (50% del libro)...';
+                  _processingDetail = '${finalChapters[i].title} • Listo para escuchar';
+                });
+              }
+              final translated = await BookTranslationService.translateSingleChapter(finalChapters[i]);
+              finalChapters[i] = translated;
             }
             triggerBackgroundTranslation = true;
           }
@@ -315,14 +320,19 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           final wantTranslate = await _askTranslateOrKeepOriginal();
           if (wantTranslate == true) {
             activeLang = 'es';
-            setState(() {
-              _processingPercent = 70;
-              _processingStatus = 'Traduciendo Capítulo 1 al español...';
-              _processingDetail = 'Listo para escuchar de inmediato';
-            });
-            if (finalChapters.isNotEmpty) {
-              final firstTranslated = await BookTranslationService.translateSingleChapter(finalChapters.first);
-              finalChapters[0] = firstTranslated;
+            // Traducir por adelantado el 50% de los capítulos en la pantalla de carga
+            final initialTarget = max(1, (finalChapters.length * 0.50).ceil());
+            for (int i = 0; i < initialTarget && i < finalChapters.length; i++) {
+              final pct = 60 + (((i + 1) / initialTarget) * 35).round();
+              if (mounted) {
+                setState(() {
+                  _processingPercent = pct.clamp(60, 95);
+                  _processingStatus = 'Traduciendo al español: Cap. ${i + 1} de $initialTarget (50% del libro)...';
+                  _processingDetail = '${finalChapters[i].title} • Listo para escuchar';
+                });
+              }
+              final translated = await BookTranslationService.translateSingleChapter(finalChapters[i]);
+              finalChapters[i] = translated;
             }
             triggerBackgroundTranslation = true;
           } else {

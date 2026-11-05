@@ -257,13 +257,35 @@ class _PlayerScreenState extends State<PlayerScreen>
     NativeChannelService.pauseLoFi();
     await widget.player.stop();
 
+    // Si el libro está en modo español pero este capítulo todavía no fue traducido,
+    // traducirlo en el acto para que jamás se cuelgue ni quede mudo al pasar de sección.
+    ChapterItem playableChapter = chapter;
+    if (widget.book.activeAudioLanguage == 'es' &&
+        (playableChapter.originalLanguageSegments == null || playableChapter.originalLanguageSegments!.isEmpty) &&
+        widget.book.detectedLanguage == 'en') {
+      if (mounted) {
+        setState(() {
+          _isSynthesizing = true;
+          _statusMessage = 'Traduciendo ${chapter.title} al español...';
+        });
+      }
+      try {
+        playableChapter = await BookTranslationService.translateSingleChapter(chapter);
+        final chIdx = widget.book.chapters.indexWhere((c) => c.id == chapter.id);
+        if (chIdx != -1) {
+          widget.book.chapters[chIdx] = playableChapter;
+          unawaited(LibraryRepository().saveBooks([widget.book]));
+        }
+      } catch (_) {}
+    }
+
     // Usa los segmentos correspondientes al idioma de audio activo (Español o Inglés)
-    final segs = chapter.getSegmentsForLanguage(widget.book.activeAudioLanguage);
+    final segs = playableChapter.getSegmentsForLanguage(widget.book.activeAudioLanguage);
     final int safeSeg = startSegment.clamp(0, max<int>(0, segs.length - 1)).toInt();
 
     if (!mounted) return;
     setState(() {
-      _currentChapter = chapter;
+      _currentChapter = playableChapter;
       _segments = segs;
       _currentSegmentIndex = safeSeg;
       _lastAutoScrolledSegment = -1;
@@ -271,7 +293,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       _statusMessage = 'Preparando voz HD (${_selectedVoiceName.split(' ').first})...';
     });
 
-    widget.onProgressUpdated?.call(chapter, safeSeg, segs.length, initialSeekMs);
+    widget.onProgressUpdated?.call(playableChapter, safeSeg, segs.length, initialSeekMs);
     await _playSegmentAtIndex(safeSeg, gen, initialSeekMs);
   }
 

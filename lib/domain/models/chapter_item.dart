@@ -37,7 +37,10 @@ class ChapterItem {
     if (lang == 'en' && originalLanguageSegments != null && originalLanguageSegments!.isNotEmpty) {
       return originalLanguageSegments!;
     }
-    _cachedSegments ??= TextSanitizer.splitIntoSegments(textContent);
+    if (_cachedSegments != null && _cachedSegments!.isNotEmpty) {
+      return _cachedSegments!;
+    }
+    _cachedSegments = TextSanitizer.splitIntoSegments(textContent);
     return _cachedSegments!;
   }
 

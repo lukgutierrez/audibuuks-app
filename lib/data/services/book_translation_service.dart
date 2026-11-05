@@ -197,8 +197,8 @@ class BookTranslationService {
           isCompleted: true,
         );
 
-        // Desvanecer el aviso completado a los 4 segundos
-        Future.delayed(const Duration(seconds: 4), () {
+        // Desvanecer el aviso completado a los 6 segundos
+        Future.delayed(const Duration(seconds: 6), () {
           if (progressNotifier.value?.bookId == book.id && progressNotifier.value?.isCompleted == true) {
             progressNotifier.value = null;
           }

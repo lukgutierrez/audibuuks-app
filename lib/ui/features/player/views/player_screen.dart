@@ -285,7 +285,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
   }
 
-  Future<void> _playSegmentAtIndex(int index, [int? _ignoredGen, int seekToMs = 0]) async {
+  Future<void> _playSegmentAtIndex(int index, [int? ignoredGen, int seekToMs = 0]) async {
     if (!mounted) return;
     if (index < 0 || index >= _segments.length) return;
 
@@ -1460,14 +1460,16 @@ class _PlayerScreenState extends State<PlayerScreen>
                                             chapter: ch,
                                             voiceKey: _selectedVoiceKey,
                                           );
-                                          ScaffoldMessenger.of(context).showSnackBar(
-                                            SnackBar(
-                                              content: Text('Descarga eliminada: ${ch.title}'),
-                                              backgroundColor: Colors.white12,
-                                              behavior: SnackBarBehavior.floating,
-                                              duration: const Duration(seconds: 1),
-                                            ),
-                                          );
+                                          if (mounted) {
+                                            ScaffoldMessenger.of(context).showSnackBar(
+                                              SnackBar(
+                                                content: Text('Descarga eliminada: ${ch.title}'),
+                                                backgroundColor: Colors.white12,
+                                                behavior: SnackBarBehavior.floating,
+                                                duration: const Duration(seconds: 1),
+                                              ),
+                                            );
+                                          }
                                         } else {
                                           _downloadService.downloadChapter(
                                             bookId: widget.book.id,

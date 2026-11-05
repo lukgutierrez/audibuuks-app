@@ -37,10 +37,6 @@ class LibraryRepository {
       final List<BookItem> resultBooks = [];
 
       for (final b in loaded) {
-        if (b.id == 'oakley_numeros' && (b.coverUrl == null || b.coverUrl!.isEmpty)) {
-          b.coverUrl = sampleOakleyBook.coverUrl;
-        }
-
         // Restaurar progreso rápido ultraligero si existe
         final rawFastProg = prefs.getString(_fastProgressKey(b.id));
         if (rawFastProg != null) {
@@ -96,10 +92,8 @@ class LibraryRepository {
 
       return resultBooks;
     } else {
-      final initial = [sampleOakleyBook];
-      await saveBooks(initial);
       await prefs.setInt(_sanitizedVersionPrefsKey, _currentSanitizerVersion);
-      return initial;
+      return <BookItem>[];
     }
   }
 

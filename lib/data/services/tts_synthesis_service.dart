@@ -25,6 +25,7 @@ class TtsSynthesisService {
   static String? _cachedDocDirPath;
 
   static const Map<String, String> voicesMap = {
+    // Español
     'es-MX-JorgeNeural': 'Jorge HD (México 🇲🇽 • Cálido)',
     'es-AR-TomasNeural': 'Tomás HD (Argentina 🇦🇷 • Natural)',
     'es-AR-ElenaNeural': 'Elena HD (Argentina 🇦🇷 • Suave)',
@@ -33,6 +34,12 @@ class TtsSynthesisService {
     'es-CO-GonzaloNeural': 'Gonzalo HD (Colombia 🇨🇴 • Narrador)',
     'es-ES-AlvaroNeural': 'Álvaro HD (España 🇪🇸 • Profundo)',
     'es-MX-DaliaNeural': 'Dalia HD (México 🇲🇽 • Clara)',
+    // Inglés (English Neuronal HD)
+    'en-US-GuyNeural': 'Guy HD (EE. UU. 🇺🇸 • Cálido y narrativo)',
+    'en-US-AriaNeural': 'Aria HD (EE. UU. 🇺🇸 • Clara y expresiva)',
+    'en-US-ChristopherNeural': 'Christopher HD (EE. UU. 🇺🇸 • Profundo)',
+    'en-GB-RyanNeural': 'Ryan HD (Reino Unido 🇬🇧 • Elegante británico)',
+    'en-GB-SoniaNeural': 'Sonia HD (Reino Unido 🇬🇧 • Suave)',
   };
 
   Future<String> _getDocDirPath() async {
@@ -42,8 +49,14 @@ class TtsSynthesisService {
     return _cachedDocDirPath!;
   }
 
-  String segmentKeyId(String bookId, ChapterItem chapter, int segIdx, String voiceKey) {
-    return '${bookId}_ch${chapter.id}_s${segIdx}_${voiceKey}_hd96_v3';
+  String segmentKeyId(String bookId, ChapterItem chapter, int segIdx, String voiceKey, {String? text}) {
+    // Si se pasa el texto del segmento, incluir un hash de los primeros 40 caracteres normalizados
+    // para evitar reproducir audios cacheados del idioma anterior (por ejemplo, inglés antes de traducir a español).
+    final textHash = (text != null && text.trim().isNotEmpty)
+        ? '_h${text.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase().hashCode.abs().toRadixString(16)}'
+        : '';
+    final langTag = voiceKey.startsWith('en-') ? 'en' : 'es';
+    return '${bookId}_ch${chapter.id}_s${segIdx}_${voiceKey}_${langTag}$textHash\_hd96_v4';
   }
 
   void _putTimingsInRamCache(String key, List<WordTimingItem> timings) {
@@ -77,9 +90,10 @@ class TtsSynthesisService {
     String bookId,
     ChapterItem chapter,
     int segIdx,
-    String voiceKey,
-  ) {
-    final key = segmentKeyId(bookId, chapter, segIdx, voiceKey);
+    String voiceKey, {
+    String? text,
+  }) {
+    final key = segmentKeyId(bookId, chapter, segIdx, voiceKey, text: text);
     return _segmentWordTimings[key];
   }
 
@@ -117,8 +131,9 @@ class TtsSynthesisService {
     required ChapterItem chapter,
     required int segIdx,
     required String voiceKey,
+    String? text,
   }) async {
-    final key = segmentKeyId(bookId, chapter, segIdx, voiceKey);
+    final key = segmentKeyId(bookId, chapter, segIdx, voiceKey, text: text);
     final file = await _getSegmentFile(bookId, key);
     return await file.exists() && await file.length() > 400;
   }
@@ -131,7 +146,7 @@ class TtsSynthesisService {
     required String voiceKey,
   }) {
     unawaited(purgeLegacyCacheIfNeeded());
-    final key = segmentKeyId(bookId, chapter, segIdx, voiceKey);
+    final key = segmentKeyId(bookId, chapter, segIdx, voiceKey, text: text);
     if (_inFlightSynthesis.containsKey(key)) {
       return _inFlightSynthesis[key]!;
     }

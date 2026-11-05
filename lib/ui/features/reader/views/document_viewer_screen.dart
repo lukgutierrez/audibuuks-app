@@ -10,6 +10,7 @@ import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import '../../../../core/utils/text_sanitizer.dart';
 import '../../../../data/repositories/library_repository.dart';
+import '../../../../data/services/book_translation_service.dart';
 import '../../../../data/services/native_channel_service.dart';
 import '../../../../data/services/tts_synthesis_service.dart';
 import '../../../../domain/models/book_item.dart';
@@ -170,10 +171,63 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
 
   Future<void> _loadVoicePreference() async {
     final prefs = await LibraryRepository().loadPlayerPreferences();
-    if (mounted && prefs['voiceKey'] is String) {
+    if (mounted) {
+      final isBookEnglish = widget.book.activeAudioLanguage == 'en';
+      final fallbackVoiceKey = isBookEnglish ? 'en-US-GuyNeural' : 'es-MX-JorgeNeural';
+      final savedVoiceKey = (prefs['voiceKey'] as String?) ?? fallbackVoiceKey;
+      final effectiveVoiceKey = (isBookEnglish && !savedVoiceKey.startsWith('en-'))
+          ? 'en-US-GuyNeural'
+          : (!isBookEnglish && savedVoiceKey.startsWith('en-'))
+              ? 'es-MX-JorgeNeural'
+              : savedVoiceKey;
       setState(() {
-        _selectedVoiceKey = prefs['voiceKey'] as String;
+        _selectedVoiceKey = effectiveVoiceKey;
       });
+    }
+  }
+
+  Future<void> _toggleViewerAudioLanguage() async {
+    final newLang = widget.book.activeAudioLanguage == 'es' ? 'en' : 'es';
+    widget.book.activeAudioLanguage = newLang;
+
+    if (newLang == 'es') {
+      final chIdx = _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1);
+      final ch = widget.book.chapters[chIdx];
+      final isTextEnglish = BookTranslationService.detectLanguage(ch.textContent) == 'en';
+      if (isTextEnglish && (ch.originalLanguageSegments == null || ch.originalLanguageSegments!.isEmpty)) {
+        try {
+          final translated = await BookTranslationService.translateSingleChapter(ch);
+          widget.book.chapters[chIdx] = translated;
+        } catch (_) {}
+      }
+    }
+
+    final newVoiceKey = newLang == 'en' ? 'en-US-GuyNeural' : 'es-MX-JorgeNeural';
+    final newVoiceName = TtsSynthesisService.voicesMap[newVoiceKey] ??
+        (newLang == 'en' ? 'Guy HD (EE. UU. 🇺🇸 • Cálido y narrativo)' : 'Jorge HD (México 🇲🇽 • Cálido)');
+
+    setState(() {
+      _selectedVoiceKey = newVoiceKey;
+    });
+
+    await LibraryRepository().savePlayerPreferences(
+      voiceKey: newVoiceKey,
+      voiceName: newVoiceName,
+    );
+
+    widget.onSeekToPosition?.call(_liveAudioChapterIndex, _liveAudioSegmentIndex);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            newLang == 'es' ? '🇪🇸 Audio cambiado a Español' : '🇺🇸 Audio cambiado a Inglés (Original)',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          duration: const Duration(seconds: 2),
+          backgroundColor: newLang == 'es' ? const Color(0xFFEAA036) : const Color(0xFF1976D2),
+        ),
+      );
     }
   }
 
@@ -323,7 +377,9 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     if (totalPages <= 0) return 0;
     final chIdx = _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1);
     final ch = widget.book.chapters[chIdx];
-    final segs = ch.segments;
+    final segs = (ch.originalLanguageSegments != null && ch.originalLanguageSegments!.isNotEmpty)
+        ? ch.originalLanguageSegments!
+        : ch.segments;
     final totalSegs = max(1, segs.length);
     final segIdx = _liveAudioSegmentIndex.clamp(0, totalSegs - 1);
 
@@ -356,7 +412,16 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           estimatedPage,
           if (estimatedPage + 1 < totalPages) estimatedPage + 1,
           if (estimatedPage - 1 >= 0) estimatedPage - 1,
+          if (estimatedPage + 2 < totalPages) estimatedPage + 2,
+          if (estimatedPage - 2 >= 0) estimatedPage - 2,
         };
+        if (range != null) {
+          final rStart = range[0].clamp(0, totalPages - 1);
+          final rEnd = range[1].clamp(rStart, totalPages - 1);
+          for (int p = rStart; p <= rEnd; p++) {
+            candidates.add(p);
+          }
+        }
 
         int bestPage = estimatedPage;
         int bestHits = -1;
@@ -487,7 +552,9 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
 
     final chIdx = _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1);
     final ch = widget.book.chapters[chIdx];
-    final segs = ch.segments;
+    final segs = (ch.originalLanguageSegments != null && ch.originalLanguageSegments!.isNotEmpty)
+        ? ch.originalLanguageSegments!
+        : ch.segments;
     if (segs.isEmpty) {
       return (activeLineRects: const [], activeWordRect: null);
     }
@@ -662,7 +729,9 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       final ch = widget.book.chapters[i];
       final range = _parseChapterPageRange(ch);
       if (range != null && targetPage >= range[0] && targetPage <= range[1]) {
-        final segs = ch.segments;
+        final segs = (ch.originalLanguageSegments != null && ch.originalLanguageSegments!.isNotEmpty)
+            ? ch.originalLanguageSegments!
+            : ch.segments;
         if (segs.isEmpty) {
           return (chapterIndex: i, chapter: ch, startSeg: 0, endSeg: 0);
         }
@@ -823,7 +892,10 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
 
     for (final cIdx in candidateChIndices) {
       final ch = widget.book.chapters[cIdx];
-      final segs = ch.segments;
+      // Si el PDF original está en inglés y el libro fue traducido, comparar contra los fragmentos originales en inglés
+      final segs = (ch.originalLanguageSegments != null && ch.originalLanguageSegments!.isNotEmpty)
+          ? ch.originalLanguageSegments!
+          : ch.segments;
       for (int s = 0; s < segs.length; s++) {
         final segWords = segs[s]
             .split(RegExp(r'\s+'))
@@ -1178,6 +1250,33 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                 ),
               ),
               actions: [
+                if (widget.book.chapters.any((c) => c.originalLanguageSegments != null && c.originalLanguageSegments!.isNotEmpty))
+                  GestureDetector(
+                    onTap: _toggleViewerAudioLanguage,
+                    child: Container(
+                      margin: const EdgeInsets.symmetric(vertical: 10, horizontal: 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2C2D32),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: widget.book.activeAudioLanguage == 'es'
+                              ? const Color(0xFFF5A623)
+                              : const Color(0xFF64B5F6),
+                        ),
+                      ),
+                      child: Text(
+                        widget.book.activeAudioLanguage == 'es' ? '🇪🇸 ES' : '🇺🇸 EN',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold,
+                          color: widget.book.activeAudioLanguage == 'es'
+                              ? const Color(0xFFF5A623)
+                              : const Color(0xFF64B5F6),
+                        ),
+                      ),
+                    ),
+                  ),
                 if (_viewerMode == 0 && _totalPdfPages > 0)
                   InkWell(
                     borderRadius: BorderRadius.circular(16),

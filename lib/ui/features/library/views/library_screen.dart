@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import '../../../../data/repositories/library_repository.dart';
 import '../../../../data/services/audio_player_service.dart';
+import '../../../../data/services/book_translation_service.dart';
 import '../../../../data/services/cover_service.dart';
 import '../../../../data/services/epub_processor_service.dart';
 import '../../../../data/services/native_channel_service.dart';
@@ -196,7 +197,48 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
         if (epubBook == null) {
           throw Exception('No se pudo procesar el contenido del libro EPUB.');
         }
-        newBook = epubBook;
+
+        final sampleText = epubBook.chapters.take(3).map((c) => c.textContent).join(' ');
+        final detectedLang = BookTranslationService.detectLanguage(sampleText);
+        var finalChapters = List<ChapterItem>.from(epubBook.chapters);
+        var activeLang = detectedLang;
+        bool triggerBackgroundTranslation = false;
+
+        if (detectedLang == 'en' && mounted) {
+          final wantTranslate = await _askTranslateOrKeepOriginal();
+          if (wantTranslate == true) {
+            activeLang = 'es';
+            setState(() {
+              _processingPercent = 70;
+              _processingStatus = 'Traduciendo Capítulo 1 al español...';
+              _processingDetail = 'Listo para escuchar de inmediato';
+            });
+            if (finalChapters.isNotEmpty) {
+              final firstTranslated = await BookTranslationService.translateSingleChapter(finalChapters.first);
+              finalChapters[0] = firstTranslated;
+            }
+            triggerBackgroundTranslation = true;
+          }
+        }
+
+        newBook = BookItem(
+          id: epubBook.id,
+          title: epubBook.title,
+          author: epubBook.author,
+          coverTag: activeLang == 'en' ? '🇺🇸' : epubBook.coverTag,
+          totalTime: epubBook.totalTime,
+          chapters: finalChapters,
+          coverImagePath: epubBook.coverImagePath,
+          coverUrl: epubBook.coverUrl,
+          originalFilePath: epubBook.originalFilePath,
+          fileType: 'epub',
+          detectedLanguage: detectedLang,
+          activeAudioLanguage: activeLang,
+        );
+
+        if (triggerBackgroundTranslation) {
+          BookTranslationService.startBackgroundBookTranslation(newBook);
+        }
       } else {
         String fileName = file.name;
         if (fileName.toLowerCase().endsWith('.pdf')) {
@@ -260,7 +302,35 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           throw Exception('No se pudo extraer texto seleccionable del PDF.');
         }
 
-        final int totalMins = parsedChapters.fold<int>(
+        // 1. Detectar idioma del libro
+        final sampleText = parsedChapters.take(3).map((c) => c.textContent).join(' ');
+        final detectedLang = BookTranslationService.detectLanguage(sampleText);
+
+        var finalChapters = List<ChapterItem>.from(parsedChapters);
+        String activeLang = detectedLang;
+        bool triggerBackgroundTranslation = false;
+
+        // 2. Si es inglés, preguntar al usuario si desea traducir al español o mantener en inglés
+        if (detectedLang == 'en' && mounted) {
+          final wantTranslate = await _askTranslateOrKeepOriginal();
+          if (wantTranslate == true) {
+            activeLang = 'es';
+            setState(() {
+              _processingPercent = 70;
+              _processingStatus = 'Traduciendo Capítulo 1 al español...';
+              _processingDetail = 'Listo para escuchar de inmediato';
+            });
+            if (finalChapters.isNotEmpty) {
+              final firstTranslated = await BookTranslationService.translateSingleChapter(finalChapters.first);
+              finalChapters[0] = firstTranslated;
+            }
+            triggerBackgroundTranslation = true;
+          } else {
+            activeLang = 'en';
+          }
+        }
+
+        final int totalMins = finalChapters.fold<int>(
           0,
           (sum, ch) => sum + (ch.estimatedTotalSeconds ~/ 60),
         );
@@ -272,14 +342,20 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           id: bookId,
           title: bookTitle,
           author: 'Audiolibro Completo',
-          coverTag: '📚',
+          coverTag: activeLang == 'en' ? '🇺🇸' : '📚',
           totalTime: totalTimeFormatted,
-          chapters: parsedChapters,
+          chapters: finalChapters,
           coverImagePath: coverData['path'],
           coverUrl: coverData['url'],
           originalFilePath: permanentFilePath,
           fileType: 'pdf',
+          detectedLanguage: detectedLang,
+          activeAudioLanguage: activeLang,
         );
+
+        if (triggerBackgroundTranslation) {
+          BookTranslationService.startBackgroundBookTranslation(newBook);
+        }
       }
 
       if (mounted) {
@@ -311,6 +387,64 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
         );
       }
     }
+  }
+
+  Future<bool?> _askTranslateOrKeepOriginal() async {
+    return showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E1E24),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(24)),
+        title: const Row(
+          children: [
+            Text('🌐 ', style: TextStyle(fontSize: 24)),
+            Expanded(
+              child: Text(
+                'Libro en Inglés Detectado',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18, color: Colors.white),
+              ),
+            ),
+          ],
+        ),
+        content: const Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              'Hemos detectado que el texto original está en inglés. ¿Cómo deseas disfrutar este libro?',
+              style: TextStyle(color: Colors.white70, fontSize: 14, height: 1.4),
+            ),
+            SizedBox(height: 16),
+            Text(
+              '• Traducir a Español: Narración y texto en español con voces latinas/españolas.\n• Idioma Original (Inglés): Narración fluida en inglés con voces nativas de EE.UU./UK.',
+              style: TextStyle(color: Colors.white54, fontSize: 12, height: 1.3),
+            ),
+          ],
+        ),
+        actionsPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            style: TextButton.styleFrom(
+              foregroundColor: Colors.white70,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+            ),
+            child: const Text('🇺🇸 Mantener en Inglés'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: const Color(0xFFEAA036),
+              foregroundColor: Colors.black,
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            ),
+            child: const Text('🇪🇸 Traducir a Español', style: TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
   }
 
   void _confirmDeleteBook(BookItem book) {

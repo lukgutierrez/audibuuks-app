@@ -11,6 +11,8 @@ class BookItem {
   String? coverUrl;
   String? originalFilePath;
   String? fileType; // 'pdf' | 'epub' | 'sample'
+  String detectedLanguage; // 'es' | 'en'
+  String activeAudioLanguage; // 'es' | 'en'
 
   // Progreso persistente exacto (capítulo, párrafo y milisegundo exacto)
   int lastChapterIndex;
@@ -32,6 +34,8 @@ class BookItem {
     this.coverUrl,
     this.originalFilePath,
     this.fileType = 'pdf',
+    this.detectedLanguage = 'es',
+    this.activeAudioLanguage = 'es',
     this.lastChapterIndex = 0,
     this.lastSegmentIndex = 0,
     this.lastPositionMs = 0,
@@ -70,6 +74,8 @@ class BookItem {
         'coverUrl': coverUrl,
         'originalFilePath': originalFilePath,
         'fileType': fileType,
+        'detectedLanguage': detectedLanguage,
+        'activeAudioLanguage': activeAudioLanguage,
         'lastChapterIndex': lastChapterIndex,
         'lastSegmentIndex': lastSegmentIndex,
         'lastPositionMs': lastPositionMs,
@@ -90,6 +96,8 @@ class BookItem {
         coverUrl: json['coverUrl'] as String?,
         originalFilePath: json['originalFilePath'] as String?,
         fileType: json['fileType'] as String? ?? 'pdf',
+        detectedLanguage: json['detectedLanguage'] as String? ?? 'es',
+        activeAudioLanguage: json['activeAudioLanguage'] as String? ?? 'es',
         lastChapterIndex: (json['lastChapterIndex'] as int?) ?? 0,
         lastSegmentIndex: (json['lastSegmentIndex'] as int?) ?? 0,
         lastPositionMs: (json['lastPositionMs'] as int?) ?? 0,

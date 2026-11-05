@@ -25,15 +25,35 @@ class TextSanitizer {
         .replaceAll(RegExp(r'https?://\S+'), '')
         .replaceAll(RegExp(r'www\.\S+'), '');
 
-    // 3. Eliminar números de página huérfanos en líneas solas (ej. "\n 42 \n" o "\n- 42 -\n" o "Página 42")
+    // 3. Eliminar números de página huérfanos y cabeceras aisladas de 1 a 2 letras separadas por espacios (ej. "\n 42 \n", "\n D E \n", "\n A P \n")
     s = s
         .replaceAll(RegExp(r'\n\s*[-–—]?\s*\d{1,4}\s*[-–—]?\s*(?=\n)'), '\n')
+        .replaceAll(RegExp(r'\n\s*[A-ZÁÉÍÓÚÑ]\s+[A-ZÁÉÍÓÚÑ]\s*(?=\n)'), '\n')
         .replaceAll(RegExp(r'\b[Pp]áginas?\s+\d+\s*(?:a|al|-)\s*\d+\b'), '');
 
     // 4. Unir palabras cortadas por guión al final de línea en PDFs ("pro-\nceso" -> "proceso")
     s = s.replaceAllMapped(
       RegExp(r'([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ])[-‐‑‒–]\s*\n\s*([a-záéíóúñü])'),
       (m) => '${m.group(1)}${m.group(2)}',
+    );
+
+    // 4b. Corregir letras capitales / capitulares huérfanas al inicio de títulos o párrafos:
+    // "D\nE\nL INFORME" -> "DEL INFORME", "U\nN ENSAYO" -> "UN ENSAYO", "S\nELECCIÓN" -> "SELECCIÓN"
+    s = s.replaceAllMapped(
+      RegExp(r'(?:^|\n)\s*([A-ZÁÉÍÓÚÑ])\s*\n+\s*([A-ZÁÉÍÓÚÑ])\s*\n+\s*([A-ZÁÉÍÓÚÑ])(?=\s+[A-ZÁÉÍÓÚÑ])'),
+      (m) => '\n${m.group(1)}${m.group(2)}${m.group(3)}',
+    );
+    s = s.replaceAllMapped(
+      RegExp(r'(?:^|\n)\s*([A-ZÁÉÍÓÚÑ])\s*\n+\s*([A-ZÁÉÍÓÚÑ])(?=\s+[A-ZÁÉÍÓÚÑ])'),
+      (m) => '\n${m.group(1)}${m.group(2)}',
+    );
+    s = s.replaceAllMapped(
+      RegExp(r'(?:^|\n)\s*([A-ZÁÉÍÓÚÑ])\s*\n+\s*([A-ZÁÉÍÓÚÑ]{2,})\b'),
+      (m) => '\n${m.group(1)}${m.group(2)}',
+    );
+    s = s.replaceAllMapped(
+      RegExp(r'(?:^|\n)\s*([A-ZÁÉÍÓÚÑ])\s*\n+\s*([a-záéíóúñü]{1,4})\b'),
+      (m) => '\n${m.group(1)}${m.group(2)}',
     );
 
     // 5. Proteger y unir iniciales de nombres propios cortadas por salto de línea ("Gordon W.\nAllport" -> "Gordon W. Allport")

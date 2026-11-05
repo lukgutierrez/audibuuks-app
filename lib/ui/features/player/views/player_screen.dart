@@ -8,6 +8,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 
 import '../../../../core/utils/text_sanitizer.dart';
 import '../../../../data/repositories/library_repository.dart';
+import '../../../../data/services/book_translation_service.dart';
 import '../../../../data/services/cover_service.dart';
 import '../../../../data/services/native_channel_service.dart';
 import '../../../../data/services/offline_download_service.dart';
@@ -112,17 +113,25 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted) return;
 
     final savedSpeed = (prefs['speed'] as double?) ?? 1.0;
-    final savedVoiceKey = (prefs['voiceKey'] as String?) ?? 'es-MX-JorgeNeural';
+    final isBookEnglish = widget.book.activeAudioLanguage == 'en';
+    final fallbackVoiceKey = isBookEnglish ? 'en-US-GuyNeural' : 'es-MX-JorgeNeural';
+    final savedVoiceKey = (prefs['voiceKey'] as String?) ?? fallbackVoiceKey;
+    final effectiveVoiceKey = (isBookEnglish && !savedVoiceKey.startsWith('en-'))
+        ? 'en-US-GuyNeural'
+        : (!isBookEnglish && savedVoiceKey.startsWith('en-'))
+            ? 'es-MX-JorgeNeural'
+            : savedVoiceKey;
+
     final savedVoiceName =
-        TtsSynthesisService.voicesMap[savedVoiceKey] ??
+        TtsSynthesisService.voicesMap[effectiveVoiceKey] ??
         (prefs['voiceName'] as String?) ??
-        'Jorge HD (México 🇲🇽 • Cálido)';
+        (isBookEnglish ? 'Guy HD (EE. UU. 🇺🇸 • Cálido y narrativo)' : 'Jorge HD (México 🇲🇽 • Cálido)');
     final savedVol = (prefs['ambientVolume'] as double?) ?? 0.25;
     final savedTrack = prefs['ambientTrackId'] as String?;
 
     setState(() {
       _playbackSpeed = savedSpeed.clamp(0.70, 2.00);
-      _selectedVoiceKey = savedVoiceKey;
+      _selectedVoiceKey = effectiveVoiceKey;
       _selectedVoiceName = savedVoiceName;
       _ambientVolume = savedVol.clamp(0.0, 1.0);
       if (savedTrack != null && savedTrack.isNotEmpty) {
@@ -248,8 +257,8 @@ class _PlayerScreenState extends State<PlayerScreen>
     NativeChannelService.pauseLoFi();
     await widget.player.stop();
 
-    // Usa los segmentos ya cacheados en memoria en ChapterItem (O(1), 0ms en el hilo UI)
-    final segs = chapter.segments;
+    // Usa los segmentos correspondientes al idioma de audio activo (Español o Inglés)
+    final segs = chapter.getSegmentsForLanguage(widget.book.activeAudioLanguage);
     final int safeSeg = startSegment.clamp(0, max<int>(0, segs.length - 1)).toInt();
 
     if (!mounted) return;
@@ -297,11 +306,13 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     // Verificar si el párrafo ya está pre-cargado en caché local (estilo YouTube Music).
     // Si ya está en caché, NO mostramos el spinner de carga para que la transición sea 100% invisible y continua.
+    final currentSegText = _segments[index];
     final bool alreadyCached = await _ttsService.isSegmentCached(
       bookId: widget.book.id,
       chapter: chapter,
       segIdx: index,
       voiceKey: voiceKey,
+      text: currentSegText,
     );
     if (gen != _synthesisGeneration || !mounted) return;
 
@@ -328,7 +339,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           bookId: widget.book.id,
           chapter: chapter,
           segIdx: index,
-          text: _segments[index],
+          text: currentSegText,
           voiceKey: voiceKey,
         );
         break;
@@ -420,7 +431,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     int gen,
   ) async {
     final prefetchId = ++_prefetchGeneration;
-    final segs = chapter.segments;
+    final segs = chapter.getSegmentsForLanguage(widget.book.activeAudioLanguage);
 
     for (int i = startIdx; i < min(segs.length, startIdx + 12); i++) {
       if (prefetchId != _prefetchGeneration ||
@@ -448,7 +459,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       final chIdx = widget.book.chapters.indexWhere((c) => c.id == chapter.id);
       if (chIdx != -1 && chIdx + 1 < widget.book.chapters.length) {
         final nextCh = widget.book.chapters[chIdx + 1];
-        final nextSegs = nextCh.segments;
+        final nextSegs = nextCh.getSegmentsForLanguage(widget.book.activeAudioLanguage);
         for (int k = 0; k < min(4, nextSegs.length); k++) {
           if (prefetchId != _prefetchGeneration ||
               _currentChapter.id != chapter.id ||
@@ -548,11 +559,15 @@ class _PlayerScreenState extends State<PlayerScreen>
   int _getActiveWordIndexForCurrentSegment(List<String> tokens) {
     if (tokens.isEmpty) return -1;
     final posMs = _position.inMilliseconds;
+    final currentText = (_currentSegmentIndex >= 0 && _currentSegmentIndex < _segments.length)
+        ? _segments[_currentSegmentIndex]
+        : null;
     final timings = _ttsService.getWordTimings(
       widget.book.id,
       _currentChapter,
       _currentSegmentIndex,
       _selectedVoiceKey,
+      text: currentText,
     );
 
     if (timings != null && timings.isNotEmpty) {
@@ -1155,51 +1170,85 @@ class _PlayerScreenState extends State<PlayerScreen>
                 child: SingleChildScrollView(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
-                    children: TtsSynthesisService.voicesMap.entries.map((entry) {
-                      final isSelected = _selectedVoiceKey == entry.key;
-                      return ListTile(
-                        contentPadding: EdgeInsets.zero,
-                        leading: CircleAvatar(
-                          backgroundColor: isSelected
-                              ? const Color(0xFFF5A623)
-                              : const Color(0xFF2C2D32),
-                          child: Icon(
-                            Icons.record_voice_over,
-                            color: isSelected ? Colors.black : Colors.white,
-                          ),
-                        ),
-                        title: Text(
-                          entry.value,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Padding(
+                        padding: EdgeInsets.only(top: 8, bottom: 4),
+                        child: Text(
+                          '🇪🇸 VOCES EN ESPAÑOL',
                           style: TextStyle(
-                            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                            color: isSelected ? const Color(0xFFF5A623) : Colors.white,
+                            color: Color(0xFFEAA036),
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.1,
                           ),
                         ),
-                        trailing: isSelected
-                            ? const Icon(Icons.check_circle_rounded, color: Color(0xFFF5A623))
-                            : null,
-                        onTap: () {
-                          setState(() {
-                            _selectedVoiceKey = entry.key;
-                            _selectedVoiceName = entry.value;
-                          });
-                          _repository.savePlayerPreferences(
-                            voiceKey: entry.key,
-                            voiceName: entry.value,
-                          );
-                          Navigator.pop(context);
-                          _startChapterPlayback(
-                            _currentChapter,
-                            startSegment: _currentSegmentIndex,
-                          );
-                        },
-                      );
-                    }).toList(),
+                      ),
+                      ...TtsSynthesisService.voicesMap.entries
+                          .where((e) => e.key.startsWith('es-'))
+                          .map((entry) => _buildVoiceTile(entry)),
+                      const Padding(
+                        padding: EdgeInsets.only(top: 14, bottom: 4),
+                        child: Text(
+                          '🇺🇸 VOCES EN INGLÉS (ENGLISH HD)',
+                          style: TextStyle(
+                            color: Color(0xFF64B5F6),
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            letterSpacing: 1.1,
+                          ),
+                        ),
+                      ),
+                      ...TtsSynthesisService.voicesMap.entries
+                          .where((e) => e.key.startsWith('en-'))
+                          .map((entry) => _buildVoiceTile(entry)),
+                    ],
                   ),
                 ),
               ),
             ],
           ),
+        );
+      },
+    );
+  }
+
+  Widget _buildVoiceTile(MapEntry<String, String> entry) {
+    final isSelected = _selectedVoiceKey == entry.key;
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      leading: CircleAvatar(
+        backgroundColor: isSelected
+            ? const Color(0xFFF5A623)
+            : const Color(0xFF2C2D32),
+        child: Icon(
+          Icons.record_voice_over,
+          color: isSelected ? Colors.black : Colors.white,
+        ),
+      ),
+      title: Text(
+        entry.value,
+        style: TextStyle(
+          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+          color: isSelected ? const Color(0xFFF5A623) : Colors.white,
+        ),
+      ),
+      trailing: isSelected
+          ? const Icon(Icons.check_circle_rounded, color: Color(0xFFF5A623))
+          : null,
+      onTap: () {
+        setState(() {
+          _selectedVoiceKey = entry.key;
+          _selectedVoiceName = entry.value;
+        });
+        _repository.savePlayerPreferences(
+          voiceKey: entry.key,
+          voiceName: entry.value,
+        );
+        Navigator.pop(context);
+        _startChapterPlayback(
+          _currentChapter,
+          startSegment: _currentSegmentIndex,
         );
       },
     );
@@ -1542,6 +1591,65 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  Future<void> _toggleAudioLanguage() async {
+    final newLang = widget.book.activeAudioLanguage == 'es' ? 'en' : 'es';
+    widget.book.activeAudioLanguage = newLang;
+
+    if (newLang == 'es') {
+      final ch = _currentChapter;
+      final isTextEnglish = BookTranslationService.detectLanguage(ch.textContent) == 'en';
+      if (isTextEnglish && (ch.originalLanguageSegments == null || ch.originalLanguageSegments!.isEmpty)) {
+        setState(() {
+          _isSynthesizing = true;
+          _statusMessage = 'Traduciendo capítulo al español...';
+        });
+        try {
+          final translated = await BookTranslationService.translateSingleChapter(ch);
+          final chIdx = widget.book.chapters.indexWhere((c) => c.id == ch.id);
+          if (chIdx != -1) {
+            widget.book.chapters[chIdx] = translated;
+            _currentChapter = translated;
+          }
+        } catch (_) {}
+      }
+    }
+
+    // Actualizar voz predeterminada acorde al idioma
+    final newVoiceKey = newLang == 'en' ? 'en-US-GuyNeural' : 'es-MX-JorgeNeural';
+    final newVoiceName = TtsSynthesisService.voicesMap[newVoiceKey] ??
+        (newLang == 'en' ? 'Guy HD (EE. UU. 🇺🇸 • Cálido y narrativo)' : 'Jorge HD (México 🇲🇽 • Cálido)');
+
+    setState(() {
+      _selectedVoiceKey = newVoiceKey;
+      _selectedVoiceName = newVoiceName;
+    });
+
+    await _repository.savePlayerPreferences(
+      voiceKey: newVoiceKey,
+      voiceName: newVoiceName,
+    );
+
+    // Reiniciar reproducción en el segmento actual con el nuevo idioma
+    _startChapterPlayback(
+      _currentChapter,
+      startSegment: _currentSegmentIndex,
+      initialSeekMs: 0,
+    );
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            newLang == 'es' ? '🇪🇸 Audio cambiado a Español' : '🇺🇸 Audio cambiado a Inglés (Original)',
+            style: const TextStyle(fontWeight: FontWeight.bold),
+          ),
+          duration: const Duration(seconds: 2),
+          backgroundColor: newLang == 'es' ? const Color(0xFFEAA036) : const Color(0xFF1976D2),
+        ),
+      );
+    }
+  }
+
   Widget _buildTopBar() {
     return SafeArea(
       bottom: false,
@@ -1581,6 +1689,33 @@ class _PlayerScreenState extends State<PlayerScreen>
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
+                if (widget.book.chapters.any((c) => c.originalLanguageSegments != null && c.originalLanguageSegments!.isNotEmpty))
+                  GestureDetector(
+                    onTap: _toggleAudioLanguage,
+                    child: Container(
+                      margin: const EdgeInsets.only(right: 6),
+                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF2C2D32),
+                        borderRadius: BorderRadius.circular(14),
+                        border: Border.all(
+                          color: widget.book.activeAudioLanguage == 'es'
+                              ? const Color(0xFFF5A623)
+                              : const Color(0xFF64B5F6),
+                        ),
+                      ),
+                      child: Text(
+                        widget.book.activeAudioLanguage == 'es' ? '🇪🇸 ES' : '🇺🇸 EN',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: widget.book.activeAudioLanguage == 'es'
+                              ? const Color(0xFFF5A623)
+                              : const Color(0xFF64B5F6),
+                        ),
+                      ),
+                    ),
+                  ),
                 IconButton(
                   icon: const Icon(Icons.auto_stories_rounded,
                       size: 24, color: Color(0xFFF5A623)),
@@ -2387,6 +2522,47 @@ class _PlayerScreenState extends State<PlayerScreen>
           Column(
             children: [
               _buildTopBar(),
+              ValueListenableBuilder<TranslationProgressInfo?>(
+                valueListenable: BookTranslationService.progressNotifier,
+                builder: (context, info, _) {
+                  if (info == null || info.bookId != widget.book.id) {
+                    return const SizedBox.shrink();
+                  }
+                  return Container(
+                    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF1E1E24).withValues(alpha: 0.92),
+                      borderRadius: BorderRadius.circular(16),
+                      border: Border.all(
+                        color: info.isCompleted ? const Color(0xFF81C784) : const Color(0xFFF5A623).withValues(alpha: 0.4),
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (!info.isCompleted)
+                          const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFF5A623)),
+                          )
+                        else
+                          const Icon(Icons.check_circle_rounded, size: 16, color: Color(0xFF81C784)),
+                        const SizedBox(width: 8),
+                        Text(
+                          info.statusText,
+                          style: TextStyle(
+                            fontSize: 11.5,
+                            fontWeight: FontWeight.w600,
+                            color: info.isCompleted ? const Color(0xFF81C784) : Colors.white70,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
               Expanded(
                 child: AnimatedSwitcher(
                   duration: const Duration(milliseconds: 280),

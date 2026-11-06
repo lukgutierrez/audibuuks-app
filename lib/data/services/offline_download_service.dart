@@ -66,8 +66,15 @@ class OfflineDownloadService extends ChangeNotifier {
     required String bookId,
     required ChapterItem chapter,
     required String voiceKey,
+    String? language,
   }) async {
-    final segs = chapter.segments;
+    final key = _progressKey(bookId, chapter.id);
+    if (_chapterProgress[key]?.status == DownloadStatus.completed) {
+      return true;
+    }
+
+    final lang = language ?? (voiceKey.startsWith('en-') ? 'en' : 'es');
+    final segs = chapter.getSegmentsForLanguage(lang);
     if (segs.isEmpty) return false;
 
     for (int i = 0; i < segs.length; i++) {
@@ -76,9 +83,17 @@ class OfflineDownloadService extends ChangeNotifier {
         chapter: chapter,
         segIdx: i,
         voiceKey: voiceKey,
+        text: segs[i],
       );
       if (!cached) return false;
     }
+
+    _chapterProgress[key] = ChapterDownloadProgress(
+      chapterId: chapter.id,
+      totalSegments: segs.length,
+      downloadedSegments: segs.length,
+      status: DownloadStatus.completed,
+    );
     return true;
   }
 
@@ -89,7 +104,12 @@ class OfflineDownloadService extends ChangeNotifier {
   }) async {
     int count = 0;
     for (final ch in book.chapters) {
-      if (await isChapterFullyDownloaded(bookId: book.id, chapter: ch, voiceKey: voiceKey)) {
+      if (await isChapterFullyDownloaded(
+        bookId: book.id,
+        chapter: ch,
+        voiceKey: voiceKey,
+        language: book.activeAudioLanguage,
+      )) {
         count++;
       }
     }
@@ -101,11 +121,13 @@ class OfflineDownloadService extends ChangeNotifier {
     required String bookId,
     required ChapterItem chapter,
     required String voiceKey,
+    String? language,
   }) async {
     final key = _progressKey(bookId, chapter.id);
     _cancelTokens.remove(key);
 
-    final segs = chapter.segments;
+    final lang = language ?? (voiceKey.startsWith('en-') ? 'en' : 'es');
+    final segs = chapter.getSegmentsForLanguage(lang);
     if (segs.isEmpty) return;
 
     // Calcular cuántos ya están descargados para reanudar desde donde quedó
@@ -116,6 +138,7 @@ class OfflineDownloadService extends ChangeNotifier {
         chapter: chapter,
         segIdx: i,
         voiceKey: voiceKey,
+        text: segs[i],
       )) {
         downloaded++;
       }
@@ -153,6 +176,7 @@ class OfflineDownloadService extends ChangeNotifier {
           chapter: chapter,
           segIdx: k,
           voiceKey: voiceKey,
+          text: segs[k],
         );
         if (!isAlready) {
           neededIndices.add(k);
@@ -232,6 +256,7 @@ class OfflineDownloadService extends ChangeNotifier {
           bookId: book.id,
           chapter: ch,
           voiceKey: voiceKey,
+          language: book.activeAudioLanguage,
         );
         _activeBookCompletedChapters = i + 1;
         notifyListeners();
@@ -250,13 +275,15 @@ class OfflineDownloadService extends ChangeNotifier {
     required String bookId,
     required ChapterItem chapter,
     required String voiceKey,
+    String? language,
   }) async {
     final key = _progressKey(bookId, chapter.id);
     cancelDownload(bookId, chapter.id);
 
-    final segs = chapter.segments;
+    final lang = language ?? (voiceKey.startsWith('en-') ? 'en' : 'es');
+    final segs = chapter.getSegmentsForLanguage(lang);
     for (int i = 0; i < segs.length; i++) {
-      final segKey = _ttsService.segmentKeyId(bookId, chapter, i, voiceKey);
+      final segKey = _ttsService.segmentKeyId(bookId, chapter, i, voiceKey, text: segs[i]);
       final mp3File = await _ttsService.getSegmentFilePublic(bookId, segKey);
       final wordsFile = await _ttsService.getSegmentWordsFilePublic(bookId, segKey);
       if (await mp3File.exists()) {

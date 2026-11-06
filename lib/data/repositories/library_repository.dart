@@ -112,6 +112,28 @@ class LibraryRepository {
     }
   }
 
+  /// Actualiza un único libro dentro de la lista guardada sin sobrescribir ni borrar los demás libros
+  Future<void> updateSingleBookInStorage(BookItem updatedBook) async {
+    final prefs = await SharedPreferences.getInstance();
+    final currentList = prefs.getStringList(_booksPrefsKey) ?? <String>[];
+    final updatedJson = jsonEncode(updatedBook.toJson());
+    bool replaced = false;
+    final List<String> newList = [];
+
+    for (final raw in currentList) {
+      if (!replaced && raw.contains('"id":"${updatedBook.id}"')) {
+        newList.add(updatedJson);
+        replaced = true;
+      } else {
+        newList.add(raw);
+      }
+    }
+    if (!replaced) {
+      newList.insert(0, updatedJson);
+    }
+    await prefs.setStringList(_booksPrefsKey, newList);
+  }
+
   /// Guardado ultraligero (< 0.2ms) para progreso de audio cada 2 segundos o al cambiar de capítulo.
   /// Evita serializar megabytes de texto en el hilo principal y elimina el ANR "AudioMind isn't responding".
   Future<void> saveBookProgressFast(BookItem book) async {

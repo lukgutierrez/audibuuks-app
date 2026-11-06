@@ -181,12 +181,16 @@ class BookTranslationService {
           final translated = await translateSingleChapter(ch);
           book.chapters[i] = translated;
 
-          // Guardar progreso en disco cada capítulo traducido para que jamás se pierda
-          await LibraryRepository().saveBooks([book]);
+          // Guardar progreso en disco cada 3 capítulos o al final para no bloquear el hilo UI mientras reproduce
+          if (i % 3 == 0 || i == totalChapters - 1) {
+            await LibraryRepository().updateSingleBookInStorage(book);
+          }
 
-          // Pausa suave de 250ms entre capítulos para no saturar la red ni la batería
-          await Future<void>.delayed(const Duration(milliseconds: 250));
+          // Pausa suave de 300ms entre capítulos para no saturar la red ni competir con el reproductor
+          await Future<void>.delayed(const Duration(milliseconds: 300));
         }
+
+        await LibraryRepository().updateSingleBookInStorage(book);
 
         progressNotifier.value = TranslationProgressInfo(
           bookId: book.id,

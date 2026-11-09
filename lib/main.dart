@@ -7,7 +7,7 @@ Future<void> main() async {
   try {
     await JustAudioBackground.init(
       androidNotificationChannelId: 'com.ryanheise.bg_demo.channel.audio',
-      androidNotificationChannelName: 'AudioMind Reproducción',
+      androidNotificationChannelName: 'Audibuuks Reproducción',
       androidNotificationOngoing: true,
     );
   } catch (e) {

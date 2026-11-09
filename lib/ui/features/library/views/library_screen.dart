@@ -937,9 +937,42 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
       appBar: AppBar(
         backgroundColor: Colors.transparent,
         elevation: 0,
-        title: const Text(
-          'Mi Biblioteca',
-          style: TextStyle(fontWeight: FontWeight.w800, fontSize: 25, letterSpacing: -0.5),
+        title: Row(
+          children: [
+            ClipOval(
+              child: Image.asset(
+                'assets/branding/app_icon_enhanced.png',
+                width: 34,
+                height: 34,
+                fit: BoxFit.cover,
+              ),
+            ),
+            const SizedBox(width: 10),
+            const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  'Audibuuks',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w900,
+                    fontSize: 22,
+                    letterSpacing: -0.4,
+                    height: 1.05,
+                  ),
+                ),
+                Text(
+                  'MI BIBLIOTECA',
+                  style: TextStyle(
+                    color: Color(0xFFF5A623),
+                    fontWeight: FontWeight.w700,
+                    fontSize: 9.5,
+                    letterSpacing: 1.4,
+                  ),
+                ),
+              ],
+            ),
+          ],
         ),
         actions: [
           Padding(

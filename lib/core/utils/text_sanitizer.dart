@@ -66,10 +66,80 @@ class TextSanitizer {
       (m) => '${m.group(1)}. ${m.group(2)}',
     );
 
-    // 6. Separar palabras pegadas por minúscula seguida de mayúscula: "cansancioTraducción" -> "cansancio. Traducción"
+    // 5b. Corregir artefacto de fuentes PDF con glifo 'y' duplicado o desplazado ("Estoyy", "yy", "apoyyo", "ayyuda", "yEstoyy", "y. Estoyy")
+    // En español e inglés jamás existe "yy" en ninguna palabra real, y si queda "yy" el TTS pronuncia "igriega igriega".
     s = s.replaceAllMapped(
-      RegExp(r'([a-záéíóúñü])([A-ZÁÉÍÓÚÑÜ])'),
-      (m) => '${m.group(1)}. ${m.group(2)}',
+      RegExp(r'(?:^|(?<=[\.\!\?\n]))\s*[yY]\.\s*'),
+      (_) => '',
+    );
+    s = s.replaceAllMapped(
+      RegExp(r'\b(De|Di|Da|Du|Mc|Mac|Van|Von)\.\s+([A-ZÁÉÍÓÚÑÜ][a-záéíóúñü]+)'),
+      (m) => '${m.group(1)}${m.group(2)}',
+    );
+    s = s.replaceAllMapped(
+      RegExp(r'\b[yY]+([A-ZÁÉÍÓÚÑ][a-záéíóúñü]*[yY][a-záéíóúñü]*)'),
+      (m) => m.group(1)!,
+    );
+    s = s.replaceAllMapped(
+      RegExp(r'([yY])\1+'),
+      (m) => m.group(1)!,
+    );
+
+    // 5c. Separar la conjunción "y" o artículos pegados por falta de espacio en PDFs justificados ("yypor" -> "y por", "generosay el" -> "generosa y el", "laeditorial" -> "la editorial", "esteproyecto" -> "este proyecto")
+    s = s.replaceAllMapped(
+      RegExp(
+        r'\by(por|para|con|sin|sobre|entre|hacia|hasta|desde|durante|mediante|según|como|cuando|donde|aunque|porque|pero|sino|también|además|todo|toda|todos|todas|este|esta|estos|estas|ese|esa|esos|esas|un|una|unos|unas|el|la|los|las|su|sus|mi|mis|tu|tus|me|te|se|nos|le|les|lo|al|del|en|de|a|que|si|no|más|muy|ya)\b',
+        caseSensitive: false,
+      ),
+      (m) {
+        final full = m.group(0)!.toLowerCase();
+        // Proteger palabras reales que empiezan con "y" + esas sílabas (ej. "yacimiento", "yate", "yerno", "yeso", "yoga", "yugo")
+        const realYWords = {
+          'ya', 'yate', 'yates', 'yace', 'yacen', 'yacer', 'yacimiento',
+          'yendo', 'yerno', 'yernos', 'yerba', 'yerbas', 'yerro', 'yerros',
+          'yeso', 'yema', 'yemas', 'yegua', 'yeguas', 'yo', 'yoga', 'yogur',
+          'yugo', 'yugos', 'yunta', 'yuxtaposición'
+        };
+        if (realYWords.contains(full)) return m.group(0)!;
+        final firstChar = m.group(0)!.substring(0, 1);
+        return '$firstChar ${m.group(1)}';
+      },
+    );
+    s = s.replaceAllMapped(
+      RegExp(
+        r'\b([a-záéíóúñü]{4,}[aeoáéó])y\s+(?=(?:el|la|los|las|un|una|unos|unas|su|sus|mi|mis|tu|tus|en|por|para|con|sin|de|a|que|no|se|me|le|nos|al|del|este|esta|ese|esa|todo|toda)\b)',
+        caseSensitive: false,
+      ),
+      (m) {
+        final stem = m.group(1)!.toLowerCase();
+        // Proteger verbos en 1ra persona terminados en -oy/-ay/-ey ("estoy", "soy", "doy", "voy", "hay")
+        if (stem.endsWith('est') || stem == 's' || stem == 'd' || stem == 'v' || stem == 'h') {
+          return m.group(0)!;
+        }
+        return '${m.group(1)} y ';
+      },
+    );
+    s = s.replaceAllMapped(
+      RegExp(
+        r'\b(la|el|los|las|un|una|este|esta|estos|estas|ese|esa|mi|tu|su)(editorial|proyecto|proyectos|libro|libros|mundo|vida|tiempo|camino|trabajo|equipo|proceso|familia|historia|cuerpo|mente|dolor|amor|miedo|padre|madre|hijo|hija|hermano|hermana|experiencia|sabiduría|ayuda|apoyo|manera|maneras|idea|ideas|persona|personas|campo|campos|parte|partes)\b',
+        caseSensitive: false,
+      ),
+      (m) => '${m.group(1)} ${m.group(2)}',
+    );
+
+    // 6. Separar palabras pegadas por minúscula seguida de mayúscula ("cansancioTraducción" -> "cansancio. Traducción"),
+    // pero respetando apellidos compuestos como "DeSanti", "DiCaprio", "McDonald", "MacArthur"
+    s = s.replaceAllMapped(
+      RegExp(r'\b([A-ZÁÉÍÓÚÑÜ]?[a-záéíóúñü]+)([A-ZÁÉÍÓÚÑÜ][a-záéíóúñü]+)'),
+      (m) {
+        final left = m.group(1)!;
+        final right = m.group(2)!;
+        const namePrefixes = {'De', 'Di', 'Da', 'Du', 'Mc', 'Mac', 'Van', 'Von', 'La', 'Le', 'Lo', 'St'};
+        if (namePrefixes.contains(left)) {
+          return '$left$right';
+        }
+        return '$left. $right';
+      },
     );
 
     // 7. Separar números pegados a letras o comas pegadas ("2010,MSB" -> "2010, MSB", "om1ª" -> "om 1ª")
@@ -118,6 +188,12 @@ class TextSanitizer {
     s = s
         .replaceAll(RegExp(r'\.{3,}\s*\d*'), '. ')
         .replaceAll(RegExp(r'…+\s*\d*'), '. ');
+
+    // 10b. Asegurar espacio después de punto, coma, punto y coma, dos puntos o cierre de interrogación/exclamación cuando está pegado a una letra ("enorme.Agradecidísimo" -> "enorme. Agradecidísimo")
+    s = s.replaceAllMapped(
+      RegExp(r'([,\.\;\:\!\?])([a-zA-ZáéíóúÁÉÍÓÚñÑüÜ¿¡])'),
+      (m) => '${m.group(1)} ${m.group(2)}',
+    );
 
     // 11. Unir saltos de línea simples dentro de un mismo párrafo para que la lectura sea continua y armónica
     s = s.replaceAllMapped(

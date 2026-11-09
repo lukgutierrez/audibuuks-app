@@ -9,6 +9,11 @@ class ChapterItem {
   final String textContent;
   String? localAudioPath;
   List<String>? originalLanguageSegments;
+  String? noteTitle;
+  String? noteContent;
+  bool isNotePinned;
+  int noteColorHex;
+  int? noteUpdatedAtMs;
 
   int? _cachedEstimatedSeconds;
   List<String>? _cachedSegments;
@@ -21,7 +26,18 @@ class ChapterItem {
     required this.textContent,
     this.localAudioPath,
     this.originalLanguageSegments,
+    this.noteTitle,
+    this.noteContent,
+    this.isNotePinned = false,
+    this.noteColorHex = 0xFF141519,
+    this.noteUpdatedAtMs,
   });
+
+  bool get hasNote =>
+      (noteContent != null && noteContent!.trim().isNotEmpty) ||
+      (noteTitle != null &&
+          noteTitle!.trim().isNotEmpty &&
+          noteTitle!.trim() != title.trim());
 
   /// Calcula una única vez la duración estimada y la reutiliza en O(1) sin bloquear el hilo principal
   int get estimatedTotalSeconds {
@@ -54,6 +70,11 @@ class ChapterItem {
         'textContent': textContent,
         'localAudioPath': localAudioPath,
         'originalLanguageSegments': originalLanguageSegments,
+        'noteTitle': noteTitle,
+        'noteContent': noteContent,
+        'isNotePinned': isNotePinned,
+        'noteColorHex': noteColorHex,
+        'noteUpdatedAtMs': noteUpdatedAtMs,
       };
 
   factory ChapterItem.fromJson(Map<String, dynamic> json) => ChapterItem(
@@ -66,5 +87,10 @@ class ChapterItem {
         originalLanguageSegments: (json['originalLanguageSegments'] as List?)
             ?.map((e) => e.toString())
             .toList(),
+        noteTitle: json['noteTitle'] as String?,
+        noteContent: json['noteContent'] as String?,
+        isNotePinned: (json['isNotePinned'] as bool?) ?? false,
+        noteColorHex: (json['noteColorHex'] as int?) ?? 0xFF141519,
+        noteUpdatedAtMs: json['noteUpdatedAtMs'] as int?,
       );
 }

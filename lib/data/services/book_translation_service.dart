@@ -149,6 +149,11 @@ class BookTranslationService {
       durationText: chapter.durationText,
       textContent: translatedSegments.join('\n\n'),
       originalLanguageSegments: original,
+      noteTitle: chapter.noteTitle,
+      noteContent: chapter.noteContent,
+      isNotePinned: chapter.isNotePinned,
+      noteColorHex: chapter.noteColorHex,
+      noteUpdatedAtMs: chapter.noteUpdatedAtMs,
     );
   }
 

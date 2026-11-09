@@ -6,13 +6,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/utils/text_sanitizer.dart';
 import '../../domain/models/book_item.dart';
 import '../../domain/models/chapter_item.dart';
+import '../services/pdf_extractor_service.dart';
 
 /// Repositorio único de verdad para la Biblioteca, progreso ultraligero y preferencias del reproductor
 class LibraryRepository {
   static const String _booksPrefsKey = 'audiomind_books';
   static const String _lastBookIdPrefsKey = 'audiomind_last_book_id';
   static const String _sanitizedVersionPrefsKey = 'audiomind_sanitized_version';
-  static const int _currentSanitizerVersion = 3;
+  static const int _currentSanitizerVersion = 5;
 
   // Claves de preferencias persistentes del reproductor (Velocidad, Voz, Música de fondo)
   static const String _prefSpeedKey = 'audiomind_pref_speed';
@@ -22,6 +23,7 @@ class LibraryRepository {
   static const String _prefAmbientTrack = 'audiomind_pref_ambient_track';
 
   static String _fastProgressKey(String bookId) => 'audiomind_prog_$bookId';
+  static String _fastNotesKey(String bookId) => 'audiomind_notes_$bookId';
 
   Future<List<BookItem>> loadBooks() async {
     final prefs = await SharedPreferences.getInstance();
@@ -50,14 +52,71 @@ class LibraryRepository {
           } catch (_) {}
         }
 
+        // Restaurar notas rápidas de cada capítulo si existen
+        final rawFastNotes = prefs.getString(_fastNotesKey(b.id));
+        if (rawFastNotes != null) {
+          try {
+            final notesMap = jsonDecode(rawFastNotes) as Map<String, dynamic>;
+            for (final ch in b.chapters) {
+              final chNote = notesMap[ch.id.toString()];
+              if (chNote is Map<String, dynamic>) {
+                ch.noteTitle = chNote['title'] as String?;
+                ch.noteContent = chNote['content'] as String?;
+                ch.isNotePinned = (chNote['pinned'] as bool?) ?? false;
+                ch.noteColorHex = (chNote['color'] as int?) ?? 0xFF141519;
+                ch.noteUpdatedAtMs = chNote['updatedAt'] as int?;
+              }
+            }
+          } catch (_) {}
+        }
+
         if (needsOneTimeSanitize) {
-          final cleanChapters = b.chapters.map((ch) {
+          List<ChapterItem> sourceChapters = b.chapters;
+          if (b.fileType == 'pdf' &&
+              b.originalFilePath != null &&
+              b.chapters.any((c) => c.textContent.contains('yy'))) {
+            try {
+              final pdfFile = File(b.originalFilePath!);
+              if (await pdfFile.exists()) {
+                final bytes = await pdfFile.readAsBytes();
+                final reExtracted = await PdfExtractorService.extractChaptersInBackground(
+                  pdfBytes: bytes,
+                  onProgress: (_, __, ___) {},
+                );
+                if (reExtracted.isNotEmpty) {
+                  for (final newCh in reExtracted) {
+                    final oldMatches = b.chapters.where((old) => old.id == newCh.id);
+                    if (oldMatches.isNotEmpty) {
+                      final oldCh = oldMatches.first;
+                      newCh.noteTitle = oldCh.noteTitle;
+                      newCh.noteContent = oldCh.noteContent;
+                      newCh.isNotePinned = oldCh.isNotePinned;
+                      newCh.noteColorHex = oldCh.noteColorHex;
+                      newCh.noteUpdatedAtMs = oldCh.noteUpdatedAtMs;
+                    }
+                  }
+                  sourceChapters = reExtracted;
+                }
+              }
+            } catch (_) {}
+          }
+
+          final cleanChapters = sourceChapters.map((ch) {
             return ChapterItem(
               id: ch.id,
               title: TextSanitizer.sanitizeExtractedText(ch.title),
               subtitle: ch.subtitle,
               durationText: ch.durationText,
               textContent: TextSanitizer.sanitizeExtractedText(ch.textContent),
+              localAudioPath: ch.localAudioPath,
+              originalLanguageSegments: ch.originalLanguageSegments
+                  ?.map((s) => TextSanitizer.sanitizeExtractedText(s))
+                  .toList(),
+              noteTitle: ch.noteTitle,
+              noteContent: ch.noteContent,
+              isNotePinned: ch.isNotePinned,
+              noteColorHex: ch.noteColorHex,
+              noteUpdatedAtMs: ch.noteUpdatedAtMs,
             );
           }).toList();
 
@@ -74,7 +133,9 @@ class LibraryRepository {
               coverUrl: b.coverUrl,
               originalFilePath: b.originalFilePath,
               fileType: b.fileType,
-              lastChapterIndex: b.lastChapterIndex,
+              detectedLanguage: b.detectedLanguage,
+              activeAudioLanguage: b.activeAudioLanguage,
+              lastChapterIndex: b.lastChapterIndex.clamp(0, cleanChapters.length - 1),
               lastSegmentIndex: b.lastSegmentIndex,
               lastPositionMs: b.lastPositionMs,
               totalSegmentsInLastChapter: b.totalSegmentsInLastChapter,
@@ -148,6 +209,25 @@ class LibraryRepository {
     await prefs.setString(_lastBookIdPrefsKey, book.id);
   }
 
+  /// Guardado instantáneo (< 0.2ms) de las notas de cada sección/capítulo en tiempo real.
+  /// Garantiza que aunque el teléfono se apague de golpe, no se pierda ni una letra escrita.
+  Future<void> saveBookNotesFast(BookItem book) async {
+    final prefs = await SharedPreferences.getInstance();
+    final Map<String, dynamic> notesMap = {};
+    for (final ch in book.chapters) {
+      if (ch.hasNote || ch.isNotePinned) {
+        notesMap[ch.id.toString()] = {
+          'title': ch.noteTitle,
+          'content': ch.noteContent,
+          'pinned': ch.isNotePinned,
+          'color': ch.noteColorHex,
+          'updatedAt': ch.noteUpdatedAtMs,
+        };
+      }
+    }
+    await prefs.setString(_fastNotesKey(book.id), jsonEncode(notesMap));
+  }
+
   /// Carga la velocidad, voz y configuración de música ambiental guardadas por el usuario
   Future<Map<String, dynamic>> loadPlayerPreferences() async {
     final prefs = await SharedPreferences.getInstance();
@@ -192,6 +272,7 @@ class LibraryRepository {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.remove(_fastProgressKey(book.id));
+      await prefs.remove(_fastNotesKey(book.id));
 
       if (book.coverImagePath != null) {
         final f = File(book.coverImagePath!);

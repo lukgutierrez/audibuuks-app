@@ -8,6 +8,7 @@ import 'package:just_audio_background/just_audio_background.dart';
 
 import '../../../../core/utils/text_sanitizer.dart';
 import '../../../../data/repositories/library_repository.dart';
+import '../../../../data/services/audio_player_service.dart';
 import '../../../../data/services/book_translation_service.dart';
 import '../../../../data/services/cover_service.dart';
 import '../../../../data/services/native_channel_service.dart';
@@ -18,6 +19,7 @@ import '../../../../domain/models/book_item.dart';
 import '../../../../domain/models/chapter_item.dart';
 import '../../../shared/widgets/book_cover_widget.dart';
 import '../../reader/views/document_viewer_screen.dart';
+import 'chapter_note_editor_sheet.dart';
 
 class PlayerScreen extends StatefulWidget {
   final BookItem book;
@@ -53,8 +55,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   final OfflineDownloadService _downloadService = OfflineDownloadService();
 
   late ChapterItem _currentChapter;
-  // 0 = Modo Portada (YouTube Premium), 1 = Modo Texto Karaoke Minimalista
-  int _viewMode = 0;
+  // 0 = Modo Portada, 1 = Modo Texto Minimalista (estilo ElevenReader por defecto)
+  int _viewMode = 1;
+  bool _immersiveTextMode = false;
 
   double _playbackSpeed = 1.0;
   double _ambientVolume = 0.25;
@@ -97,6 +100,8 @@ class _PlayerScreenState extends State<PlayerScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    audioPlayerService.setPlayerScreenMounted(true);
+    audioPlayerService.addListener(_onGlobalAudioServiceChanged);
     _currentChapter = widget.initialChapter;
     _ambientAnimController = AnimationController(
       vsync: this,
@@ -106,6 +111,35 @@ class _PlayerScreenState extends State<PlayerScreen>
     _loadCoverAmbientPalette();
     _setupAudioStreams();
     _initPreferencesAndStartPlayback();
+  }
+
+  void _onGlobalAudioServiceChanged() {
+    if (!mounted) return;
+    if (audioPlayerService.userRequestedPause && !_userRequestedPause) {
+      setState(() {
+        _userRequestedPause = true;
+        _isPlaying = false;
+        _isSynthesizing = false;
+        _statusMessage = 'Temporizador de sueño finalizado 🌙';
+      });
+    } else {
+      setState(() {});
+    }
+  }
+
+  void _syncToGlobalService() {
+    audioPlayerService.syncState(
+      book: widget.book,
+      chapter: _currentChapter,
+      segments: _segments,
+      segmentIndex: _currentSegmentIndex,
+      voiceKey: _selectedVoiceKey,
+      voiceName: _selectedVoiceName,
+      speed: _playbackSpeed,
+      ambientVol: _ambientVolume,
+      ambientTrackId: _selectedAmbientTrackId,
+      pausedByUser: _userRequestedPause,
+    );
   }
 
   Future<void> _initPreferencesAndStartPlayback() async {
@@ -149,6 +183,43 @@ class _PlayerScreenState extends State<PlayerScreen>
       NativeChannelService.setLoFiVolume(_ambientVolume);
     }
 
+    // Si este mismo libro, capítulo y párrafo ya están cargados en el motor persistente (por ejemplo, al abrir desde MiniPlayerBar),
+    // engancharse en 0ms sin cortar ni reiniciar la voz en curso.
+    if (audioPlayerService.isSameActiveTarget(
+      widget.book,
+      _currentChapter,
+      widget.initialSegmentIndex,
+    )) {
+      final activeCh = audioPlayerService.currentChapter!;
+      final segs = activeCh.getSegmentsForLanguage(widget.book.activeAudioLanguage);
+      final safeSeg = audioPlayerService.currentSegmentIndex
+          .clamp(0, max<int>(0, segs.length - 1))
+          .toInt();
+
+      setState(() {
+        _currentChapter = activeCh;
+        _segments = segs;
+        _currentSegmentIndex = safeSeg;
+        _position = widget.player.position;
+        _duration = widget.player.duration ?? Duration.zero;
+        _isPlaying = widget.player.playing;
+        _userRequestedPause = audioPlayerService.userRequestedPause;
+        _isSynthesizing = false;
+        _statusMessage = '';
+      });
+      _syncToGlobalService();
+
+      if (!_userRequestedPause && !_isPlaying) {
+        unawaited(widget.player.play().catchError((_) {}));
+        if (_ambientVolume > 0) {
+          NativeChannelService.setLoFiVolume(_ambientVolume);
+          NativeChannelService.playLoFi();
+        }
+      }
+      _startSequentialPrefetch(_currentChapter, safeSeg + 1, _selectedVoiceKey, _synthesisGeneration);
+      return;
+    }
+
     await _startChapterPlayback(
       _currentChapter,
       startSegment: widget.initialSegmentIndex,
@@ -167,6 +238,9 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    audioPlayerService.removeListener(_onGlobalAudioServiceChanged);
+    _syncToGlobalService();
+    audioPlayerService.setPlayerScreenMounted(false);
     WidgetsBinding.instance.removeObserver(this);
     _saveExactPositionNow();
     _synthesisGeneration++;
@@ -358,6 +432,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _statusMessage = '';
       }
     });
+    _syncToGlobalService();
     widget.onProgressUpdated?.call(_currentChapter, index, _segments.length, seekToMs);
     _scrollToCurrentSegment(index);
 
@@ -533,6 +608,18 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (_currentSegmentIndex + 1 < _segments.length) {
       _playSegmentAtIndex(_currentSegmentIndex + 1, _synthesisGeneration);
     } else {
+      // Si el Temporizador de Sueño está configurado en "Fin del capítulo actual", detener aquí suavemente
+      if (audioPlayerService.consumeEndOfChapterSleepIfActive()) {
+        _isHandlingCompletion = false;
+        setState(() {
+          _userRequestedPause = true;
+          _isPlaying = false;
+          _statusMessage = 'Temporizador: Fin del capítulo alcanzado 🌙';
+        });
+        _saveExactPositionNow();
+        return;
+      }
+
       final idx = widget.book.chapters.indexWhere((c) => c.id == _currentChapter.id);
       if (idx != -1 && idx + 1 < widget.book.chapters.length) {
         _startChapterPlayback(widget.book.chapters[idx + 1], startSegment: 0);
@@ -873,6 +960,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _isPlaying = false;
         _statusMessage = 'Pausado';
       });
+      _syncToGlobalService();
       _saveExactPositionNow();
       return;
     }
@@ -884,9 +972,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       setState(() {
         _isPlaying = false;
       });
+      _syncToGlobalService();
       _saveExactPositionNow();
     } else {
       _userRequestedPause = false;
+      widget.player.setVolume(1.0);
+      _syncToGlobalService();
       if (widget.player.audioSource == null) {
         _playSegmentAtIndex(
           _currentSegmentIndex,
@@ -901,6 +992,268 @@ class _PlayerScreenState extends State<PlayerScreen>
         }
       }
     }
+  }
+
+  void _showSleepTimerModal() {
+    final timePresets = <Map<String, dynamic>>[
+      {'mins': 5, 'label': '5 min', 'desc': 'Breve'},
+      {'mins': 15, 'label': '15 min', 'desc': 'Siesta'},
+      {'mins': 30, 'label': '30 min', 'desc': 'Ideal'},
+      {'mins': 45, 'label': '45 min', 'desc': 'Relajado'},
+      {'mins': 60, 'label': '60 min', 'desc': '1 hora'},
+      {'mins': 90, 'label': '90 min', 'desc': '1h 30m'},
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF16181D),
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
+      ),
+      builder: (_) {
+        return AnimatedBuilder(
+          animation: audioPlayerService,
+          builder: (ctx, _) {
+            final bool isActive = audioPlayerService.isSleepTimerActive;
+            final bool isEndChap = audioPlayerService.sleepAtEndOfChapter;
+            final int? remSec = audioPlayerService.sleepRemainingSeconds;
+
+            return SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(22, 14, 22, 26),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 42,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.bedtime_rounded, color: Color(0xFFF5A623), size: 24),
+                            SizedBox(width: 10),
+                            Text(
+                              'Temporizador de Sueño',
+                              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+                            ),
+                          ],
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
+                          decoration: BoxDecoration(
+                            color: isActive
+                                ? const Color(0xFFF5A623).withValues(alpha: 0.18)
+                                : Colors.white10,
+                            borderRadius: BorderRadius.circular(14),
+                            border: Border.all(
+                              color: isActive ? const Color(0xFFF5A623) : Colors.white24,
+                            ),
+                          ),
+                          child: Text(
+                            isActive ? '🌙 ${audioPlayerService.sleepTimerBadgeText}' : 'Apagado',
+                            style: TextStyle(
+                              color: isActive ? const Color(0xFFF5A623) : Colors.white60,
+                              fontWeight: FontWeight.w800,
+                              fontSize: 13.5,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    const Text(
+                      'Atenúa suavemente la voz y el piano en los últimos 10 segundos antes de pausar y guardar tu posición.',
+                      style: TextStyle(color: Colors.white54, fontSize: 12.5, height: 1.35),
+                    ),
+                    const SizedBox(height: 16),
+                    // Opción destacada: Al terminar el capítulo actual
+                    InkWell(
+                      borderRadius: BorderRadius.circular(16),
+                      onTap: () {
+                        if (isEndChap) {
+                          audioPlayerService.cancelSleepTimer();
+                        } else {
+                          audioPlayerService.startSleepAtEndOfChapter();
+                        }
+                      },
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                        decoration: BoxDecoration(
+                          color: isEndChap
+                              ? const Color(0xFFF5A623).withValues(alpha: 0.18)
+                              : Colors.white.withValues(alpha: 0.05),
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(
+                            color: isEndChap ? const Color(0xFFF5A623) : Colors.white12,
+                            width: isEndChap ? 1.5 : 1.0,
+                          ),
+                        ),
+                        child: Row(
+                          children: [
+                            CircleAvatar(
+                              radius: 19,
+                              backgroundColor: isEndChap
+                                  ? const Color(0xFFF5A623)
+                                  : Colors.white10,
+                              child: Icon(
+                                Icons.auto_stories_rounded,
+                                size: 20,
+                                color: isEndChap ? Colors.black : const Color(0xFFF5A623),
+                              ),
+                            ),
+                            const SizedBox(width: 14),
+                            Expanded(
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    'Al terminar este capítulo',
+                                    style: TextStyle(
+                                      fontWeight: FontWeight.w800,
+                                      fontSize: 14.5,
+                                      color: isEndChap ? const Color(0xFFF5A623) : Colors.white,
+                                    ),
+                                  ),
+                                  const SizedBox(height: 2),
+                                  Text(
+                                    'Detiene la lectura justo al concluir "${_currentChapter.title}"',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(color: Colors.white60, fontSize: 12),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Icon(
+                              isEndChap
+                                  ? Icons.check_circle_rounded
+                                  : Icons.radio_button_unchecked_rounded,
+                              color: isEndChap ? const Color(0xFFF5A623) : Colors.white38,
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 14),
+                    GridView.count(
+                      crossAxisCount: 3,
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      mainAxisSpacing: 10,
+                      crossAxisSpacing: 10,
+                      childAspectRatio: 2.1,
+                      children: timePresets.map((p) {
+                        final int mins = p['mins'] as int;
+                        final bool selected = !isEndChap &&
+                            remSec != null &&
+                            (remSec - (mins * 60)).abs() <= 45;
+                        return InkWell(
+                          borderRadius: BorderRadius.circular(14),
+                          onTap: () {
+                            audioPlayerService.startSleepTimerMinutes(mins);
+                          },
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: selected
+                                  ? const Color(0xFFF5A623)
+                                  : Colors.white.withValues(alpha: 0.06),
+                              borderRadius: BorderRadius.circular(14),
+                              border: Border.all(
+                                color: selected ? const Color(0xFFF5A623) : Colors.white12,
+                              ),
+                            ),
+                            child: Column(
+                              mainAxisAlignment: MainAxisAlignment.center,
+                              children: [
+                                Text(
+                                  p['label'] as String,
+                                  style: TextStyle(
+                                    fontWeight: FontWeight.w800,
+                                    fontSize: 14,
+                                    color: selected ? Colors.black : Colors.white,
+                                  ),
+                                ),
+                                const SizedBox(height: 2),
+                                Text(
+                                  p['desc'] as String,
+                                  style: TextStyle(
+                                    fontSize: 11,
+                                    color: selected ? Colors.black87 : Colors.white54,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      }).toList(),
+                    ),
+                    if (isActive) ...[
+                      const SizedBox(height: 16),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: OutlinedButton.icon(
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: const Color(0xFFF5A623),
+                                side: const BorderSide(color: Color(0xFFF5A623)),
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                              onPressed: () => audioPlayerService.addSleepTimerMinutes(5),
+                              icon: const Icon(Icons.add_alarm_rounded, size: 18),
+                              label: const Text(
+                                '+5 min más',
+                                style: TextStyle(fontWeight: FontWeight.w800),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 12),
+                          Expanded(
+                            child: FilledButton.tonalIcon(
+                              style: FilledButton.styleFrom(
+                                backgroundColor: Colors.redAccent.withValues(alpha: 0.18),
+                                foregroundColor: Colors.redAccent,
+                                padding: const EdgeInsets.symmetric(vertical: 12),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                              onPressed: () {
+                                audioPlayerService.cancelSleepTimer();
+                                Navigator.pop(ctx);
+                              },
+                              icon: const Icon(Icons.timer_off_rounded, size: 18),
+                              label: const Text(
+                                'Desactivar',
+                                style: TextStyle(fontWeight: FontWeight.w800),
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   void _showLoFiModal() {
@@ -1299,6 +1652,44 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  void _openChapterNoteEditor(ChapterItem targetChapter, {VoidCallback? onSheetUpdated}) {
+    final bool isCurrentCh = targetChapter.id == _currentChapter.id;
+    final String? spokenSnippet = (isCurrentCh &&
+            _segments.isNotEmpty &&
+            _currentSegmentIndex >= 0 &&
+            _currentSegmentIndex < _segments.length)
+        ? _segments[_currentSegmentIndex]
+        : null;
+    final int? spokenSegNum = isCurrentCh ? (_currentSegmentIndex + 1) : null;
+
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => ChapterNoteEditorSheet(
+          book: widget.book,
+          chapter: targetChapter,
+          currentSpokenParagraph: spokenSnippet,
+          currentSegmentNumber: spokenSegNum,
+          onNoteChanged: () {
+            if (mounted) {
+              setState(() {});
+            }
+            onSheetUpdated?.call();
+          },
+        ),
+      ),
+    );
+  }
+
+  String _cleanNotePreview(String raw) {
+    return raw
+        .replaceAll('**', '')
+        .replaceAll('__', '')
+        .replaceAll(RegExp(r'^#\s+', multiLine: true), '')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+  }
+
   void _showChaptersModal() {
     final currentChIdx =
         widget.book.chapters.indexWhere((c) => c.id == _currentChapter.id);
@@ -1314,282 +1705,428 @@ class _PlayerScreenState extends State<PlayerScreen>
         borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
       ),
       builder: (_) {
-        return DraggableScrollableSheet(
-          expand: false,
-          initialChildSize: 0.72,
-          minChildSize: 0.45,
-          maxChildSize: 0.92,
-          builder: (_, scrollController) {
-            return ListView(
-              controller: scrollController,
-              padding: const EdgeInsets.all(20),
-              children: [
-                Center(
-                  child: Container(
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.white24,
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        return StatefulBuilder(
+          builder: (modalCtx, setModalState) {
+            final int notesCount =
+                widget.book.chapters.where((c) => c.hasNote).length;
+
+            return DraggableScrollableSheet(
+              expand: false,
+              initialChildSize: 0.76,
+              minChildSize: 0.45,
+              maxChildSize: 0.94,
+              builder: (_, scrollController) {
+                return ListView(
+                  controller: scrollController,
+                  padding: const EdgeInsets.all(20),
                   children: [
-                    Text(
-                      'Capítulos (${widget.book.chapters.length})',
-                      style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
-                    ),
-                    Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        AnimatedBuilder(
-                          animation: _downloadService,
-                          builder: (ctx, _) {
-                            final bookDl = _downloadService.getBookDownloadProgress(widget.book.id);
-                            final bool isBookDl = bookDl != null;
-
-                            return FilledButton.tonalIcon(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: isBookDl
-                                    ? const Color(0xFFF5A623).withValues(alpha: 0.28)
-                                    : const Color(0xFFF5A623).withValues(alpha: 0.16),
-                                foregroundColor: const Color(0xFFF5A623),
-                                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                minimumSize: Size.zero,
-                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                              ),
-                              onPressed: () {
-                                if (isBookDl) {
-                                  _downloadService.cancelDownload(widget.book.id, -1);
-                                } else {
-                                  _downloadService.downloadEntireBook(
-                                    book: widget.book,
-                                    voiceKey: _selectedVoiceKey,
-                                  );
-                                }
-                              },
-                              icon: isBookDl
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                        color: Color(0xFFF5A623),
-                                      ),
-                                    )
-                                  : const Icon(Icons.download_for_offline_rounded, size: 15),
-                              label: Text(
-                                isBookDl
-                                    ? 'Descargando (${bookDl.completed}/${bookDl.total})'
-                                    : 'Descargar todo',
-                                style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
-                              ),
-                            );
-                          },
+                    Center(
+                      child: Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(2),
                         ),
-                        const SizedBox(width: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: const Color(0xFFF5A623).withValues(alpha: 0.15),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            '$bookPercent%',
-                            style: const TextStyle(
-                              color: Color(0xFFF5A623),
-                              fontSize: 11.5,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  'Duración total del libro: ${widget.book.totalTime}',
-                  style: const TextStyle(color: Colors.white54, fontSize: 12.5),
-                ),
-                const SizedBox(height: 14),
-                ...List.generate(widget.book.chapters.length, (idx) {
-                  final ch = widget.book.chapters[idx];
-                  final isCurrent = _currentChapter.id == ch.id;
-                  final isCompleted = currentChIdx != -1 && idx < currentChIdx;
-                  final double chProgress = isCurrent
-                      ? (_segments.isEmpty
-                          ? 0.0
-                          : ((_currentSegmentIndex + 1) / _segments.length).clamp(0.0, 1.0))
-                      : (isCompleted ? 1.0 : 0.0);
-
-                  return Container(
-                    margin: const EdgeInsets.only(bottom: 8),
-                    decoration: BoxDecoration(
-                      color: isCurrent
-                          ? const Color(0xFFF5A623).withValues(alpha: 0.12)
-                          : Colors.white.withValues(alpha: 0.03),
-                      borderRadius: BorderRadius.circular(14),
-                      border: Border.all(
-                        color: isCurrent
-                            ? const Color(0xFFF5A623).withValues(alpha: 0.5)
-                            : Colors.white10,
                       ),
                     ),
-                    child: ListTile(
-                      contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                      leading: CircleAvatar(
-                        radius: 17,
-                        backgroundColor: isCurrent
-                            ? const Color(0xFFF5A623)
-                            : (isCompleted
-                                ? Colors.green.withValues(alpha: 0.22)
-                                : const Color(0xFF2A2A2A)),
-                        child: isCompleted
-                            ? const Icon(Icons.check_rounded, size: 17, color: Colors.greenAccent)
-                            : Text(
-                                ch.id.toString().padLeft(2, '0'),
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.bold,
-                                  color: isCurrent ? Colors.black : Colors.white70,
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(
+                              'Capítulos (${widget.book.chapters.length})',
+                              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
+                            ),
+                            if (notesCount > 0) ...[
+                              const SizedBox(width: 8),
+                              Container(
+                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                                decoration: BoxDecoration(
+                                  color: const Color(0xFFF5A623).withValues(alpha: 0.18),
+                                  borderRadius: BorderRadius.circular(10),
+                                  border: Border.all(
+                                    color: const Color(0xFFF5A623).withValues(alpha: 0.45),
+                                  ),
+                                ),
+                                child: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    const Icon(
+                                      Icons.sticky_note_2_rounded,
+                                      size: 13,
+                                      color: Color(0xFFF5A623),
+                                    ),
+                                    const SizedBox(width: 4),
+                                    Text(
+                                      '$notesCount ${notesCount == 1 ? 'nota' : 'notas'}',
+                                      style: const TextStyle(
+                                        color: Color(0xFFF5A623),
+                                        fontSize: 11,
+                                        fontWeight: FontWeight.w800,
+                                      ),
+                                    ),
+                                  ],
                                 ),
                               ),
-                      ),
-                      title: Text(
-                        ch.title,
-                        style: TextStyle(
-                          color: isCurrent
-                              ? const Color(0xFFF5A623)
-                              : (isCompleted ? Colors.white70 : Colors.white),
-                          fontWeight: isCurrent ? FontWeight.bold : FontWeight.w500,
-                          fontSize: 14,
+                            ],
+                          ],
                         ),
-                      ),
-                      subtitle: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          const SizedBox(height: 3),
-                          Text(
-                            isCurrent
-                                ? 'En curso • Párrafo ${_currentSegmentIndex + 1} de ${_segments.length} (${(chProgress * 100).round()}%)'
-                                : (isCompleted
-                                    ? 'Completado • ${ch.subtitle}'
-                                    : ch.subtitle),
-                            style: TextStyle(
-                              color: isCurrent ? Colors.white70 : Colors.white54,
-                              fontSize: 11.5,
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            AnimatedBuilder(
+                              animation: _downloadService,
+                              builder: (ctx, _) {
+                                final bookDl = _downloadService.getBookDownloadProgress(widget.book.id);
+                                final bool isBookDl = bookDl != null;
+
+                                return FilledButton.tonalIcon(
+                                  style: FilledButton.styleFrom(
+                                    backgroundColor: isBookDl
+                                        ? const Color(0xFFF5A623).withValues(alpha: 0.28)
+                                        : const Color(0xFFF5A623).withValues(alpha: 0.16),
+                                    foregroundColor: const Color(0xFFF5A623),
+                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                                    minimumSize: Size.zero,
+                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                  onPressed: () {
+                                    if (isBookDl) {
+                                      _downloadService.cancelDownload(widget.book.id, -1);
+                                    } else {
+                                      _downloadService.downloadEntireBook(
+                                        book: widget.book,
+                                        voiceKey: _selectedVoiceKey,
+                                      );
+                                    }
+                                  },
+                                  icon: isBookDl
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Color(0xFFF5A623),
+                                          ),
+                                        )
+                                      : const Icon(Icons.download_for_offline_rounded, size: 15),
+                                  label: Text(
+                                    isBookDl
+                                        ? 'Descargando (${bookDl.completed}/${bookDl.total})'
+                                        : 'Descargar todo',
+                                    style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
+                                  ),
+                                );
+                              },
                             ),
-                          ),
-                          if (isCurrent) ...[
-                            const SizedBox(height: 6),
-                            ClipRRect(
-                              borderRadius: BorderRadius.circular(4),
-                              child: LinearProgressIndicator(
-                                value: chProgress,
-                                minHeight: 4,
-                                backgroundColor: Colors.white12,
-                                valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFF5A623)),
+                            const SizedBox(width: 8),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF5A623).withValues(alpha: 0.15),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Text(
+                                '$bookPercent%',
+                                style: const TextStyle(
+                                  color: Color(0xFFF5A623),
+                                  fontSize: 11.5,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
                             ),
                           ],
-                        ],
-                      ),
-                      trailing: AnimatedBuilder(
-                        animation: _downloadService,
-                        builder: (ctx, _) {
-                          final p = _downloadService.getProgress(widget.book.id, ch.id);
-                          final isDownloading = p?.status == DownloadStatus.downloading;
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Duración total del libro: ${widget.book.totalTime}',
+                      style: const TextStyle(color: Colors.white54, fontSize: 12.5),
+                    ),
+                    const SizedBox(height: 14),
+                    ...List.generate(widget.book.chapters.length, (idx) {
+                      final ch = widget.book.chapters[idx];
+                      final isCurrent = _currentChapter.id == ch.id;
+                      final isCompleted = currentChIdx != -1 && idx < currentChIdx;
+                      final double chProgress = isCurrent
+                          ? (_segments.isEmpty
+                              ? 0.0
+                              : ((_currentSegmentIndex + 1) / _segments.length).clamp(0.0, 1.0))
+                          : (isCompleted ? 1.0 : 0.0);
+                      final bool hasNote = ch.hasNote;
 
-                          return Row(
-                            mainAxisSize: MainAxisSize.min,
+                      return Container(
+                        margin: const EdgeInsets.only(bottom: 10),
+                        decoration: BoxDecoration(
+                          color: isCurrent
+                              ? const Color(0xFFF5A623).withValues(alpha: 0.12)
+                              : Colors.white.withValues(alpha: 0.03),
+                          borderRadius: BorderRadius.circular(14),
+                          border: Border.all(
+                            color: isCurrent
+                                ? const Color(0xFFF5A623).withValues(alpha: 0.5)
+                                : (hasNote
+                                    ? const Color(0xFFF5A623).withValues(alpha: 0.28)
+                                    : Colors.white10),
+                          ),
+                        ),
+                        child: ListTile(
+                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                          leading: CircleAvatar(
+                            radius: 17,
+                            backgroundColor: isCurrent
+                                ? const Color(0xFFF5A623)
+                                : (isCompleted
+                                    ? Colors.green.withValues(alpha: 0.22)
+                                    : const Color(0xFF2A2A2A)),
+                            child: isCompleted
+                                ? const Icon(Icons.check_rounded, size: 17, color: Colors.greenAccent)
+                                : Text(
+                                    ch.id.toString().padLeft(2, '0'),
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      fontWeight: FontWeight.bold,
+                                      color: isCurrent ? Colors.black : Colors.white70,
+                                    ),
+                                  ),
+                          ),
+                          title: Text(
+                            ch.title,
+                            style: TextStyle(
+                              color: isCurrent
+                                  ? const Color(0xFFF5A623)
+                                  : (isCompleted ? Colors.white70 : Colors.white),
+                              fontWeight: isCurrent ? FontWeight.bold : FontWeight.w500,
+                              fontSize: 14,
+                            ),
+                          ),
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
+                              const SizedBox(height: 3),
                               Text(
-                                ch.durationText,
+                                isCurrent
+                                    ? 'En curso • Párrafo ${_currentSegmentIndex + 1} de ${_segments.length} (${(chProgress * 100).round()}%)'
+                                    : (isCompleted
+                                        ? 'Completado • ${ch.subtitle}'
+                                        : ch.subtitle),
                                 style: TextStyle(
-                                  color: isCurrent ? const Color(0xFFF5A623) : Colors.white38,
-                                  fontSize: 12,
-                                  fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                                  color: isCurrent ? Colors.white70 : Colors.white54,
+                                  fontSize: 11.5,
                                 ),
                               ),
-                              const SizedBox(width: 8),
-                              if (isDownloading)
-                                SizedBox(
-                                  width: 22,
-                                  height: 22,
-                                  child: CircularProgressIndicator(
-                                    value: p?.progressRatio,
-                                    strokeWidth: 2.4,
-                                    color: const Color(0xFFF5A623),
+                              if (isCurrent) ...[
+                                const SizedBox(height: 6),
+                                ClipRRect(
+                                  borderRadius: BorderRadius.circular(4),
+                                  child: LinearProgressIndicator(
+                                    value: chProgress,
+                                    minHeight: 4,
+                                    backgroundColor: Colors.white12,
+                                    valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFF5A623)),
                                   ),
-                                )
-                              else
-                                FutureBuilder<bool>(
-                                  future: _downloadService.isChapterFullyDownloaded(
-                                    bookId: widget.book.id,
-                                    chapter: ch,
-                                    voiceKey: _selectedVoiceKey,
-                                    language: widget.book.activeAudioLanguage,
-                                  ),
-                                  builder: (ctx, snap) {
-                                    final isOffline = snap.data == true;
-                                    return IconButton(
-                                      visualDensity: VisualDensity.compact,
-                                      icon: Icon(
-                                        isOffline
-                                            ? Icons.check_circle_rounded
-                                            : Icons.download_for_offline_outlined,
-                                        size: 20,
-                                        color: isOffline ? Colors.greenAccent : Colors.white38,
-                                      ),
-                                      tooltip: isOffline
-                                          ? 'Descargado offline (Tocá para borrar)'
-                                          : 'Descargar capítulo',
-                                      onPressed: () async {
-                                        if (isOffline) {
-                                          await _downloadService.deleteChapterDownload(
-                                            bookId: widget.book.id,
-                                            chapter: ch,
-                                            voiceKey: _selectedVoiceKey,
-                                            language: widget.book.activeAudioLanguage,
-                                          );
-                                          if (mounted) {
-                                            ScaffoldMessenger.of(context).showSnackBar(
-                                              SnackBar(
-                                                content: Text('Descarga eliminada: ${ch.title}'),
-                                                backgroundColor: Colors.white12,
-                                                behavior: SnackBarBehavior.floating,
-                                                duration: const Duration(seconds: 1),
-                                              ),
-                                            );
-                                          }
-                                        } else {
-                                          _downloadService.downloadChapter(
-                                            bookId: widget.book.id,
-                                            chapter: ch,
-                                            voiceKey: _selectedVoiceKey,
-                                            language: widget.book.activeAudioLanguage,
-                                          );
-                                        }
-                                      },
-                                    );
-                                  },
                                 ),
+                              ],
+                              const SizedBox(height: 8),
+                              // ZONA DE NOTA DE LA SECCIÓN (donde marcaste los círculos azules)
+                              InkWell(
+                                borderRadius: BorderRadius.circular(10),
+                                onTap: () {
+                                  _openChapterNoteEditor(
+                                    ch,
+                                    onSheetUpdated: () {
+                                      setModalState(() {});
+                                    },
+                                  );
+                                },
+                                child: Container(
+                                  padding: EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: hasNote ? 7 : 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: hasNote
+                                        ? const Color(0xFFF5A623).withValues(alpha: 0.16)
+                                        : Colors.white.withValues(alpha: 0.05),
+                                    borderRadius: BorderRadius.circular(10),
+                                    border: Border.all(
+                                      color: hasNote
+                                          ? const Color(0xFFF5A623).withValues(alpha: 0.55)
+                                          : Colors.white.withValues(alpha: 0.12),
+                                    ),
+                                  ),
+                                  child: hasNote
+                                      ? Row(
+                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                          children: [
+                                            Icon(
+                                              ch.isNotePinned
+                                                  ? Icons.push_pin_rounded
+                                                  : Icons.sticky_note_2_rounded,
+                                              size: 15,
+                                              color: const Color(0xFFF5A623),
+                                            ),
+                                            const SizedBox(width: 7),
+                                            Expanded(
+                                              child: Column(
+                                                crossAxisAlignment: CrossAxisAlignment.start,
+                                                children: [
+                                                  if (ch.noteTitle != null &&
+                                                      ch.noteTitle!.trim().isNotEmpty &&
+                                                      ch.noteTitle!.trim() != ch.title.trim())
+                                                    Text(
+                                                      ch.noteTitle!.trim(),
+                                                      maxLines: 1,
+                                                      overflow: TextOverflow.ellipsis,
+                                                      style: const TextStyle(
+                                                        color: Color(0xFFF5A623),
+                                                        fontSize: 11.5,
+                                                        fontWeight: FontWeight.w800,
+                                                      ),
+                                                    ),
+                                                  Text(
+                                                    _cleanNotePreview(ch.noteContent ?? ''),
+                                                    maxLines: 2,
+                                                    overflow: TextOverflow.ellipsis,
+                                                    style: const TextStyle(
+                                                      color: Colors.white,
+                                                      fontSize: 12,
+                                                      height: 1.3,
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                            const SizedBox(width: 6),
+                                            const Icon(
+                                              Icons.edit_outlined,
+                                              size: 14,
+                                              color: Color(0xFFF5A623),
+                                            ),
+                                          ],
+                                        )
+                                      : Row(
+                                          mainAxisSize: MainAxisSize.min,
+                                          children: const [
+                                            Icon(
+                                              Icons.edit_note_rounded,
+                                              size: 16,
+                                              color: Color(0xFFF5A623),
+                                            ),
+                                            SizedBox(width: 5),
+                                            Text(
+                                              '+ Nota de sección',
+                                              style: TextStyle(
+                                                color: Color(0xFFF5A623),
+                                                fontSize: 11.5,
+                                                fontWeight: FontWeight.w700,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                ),
+                              ),
                             ],
-                          );
-                        },
-                      ),
-                      onTap: () {
-                        Navigator.pop(context);
-                        _startChapterPlayback(ch, startSegment: 0);
-                      },
-                    ),
-                  );
-                }),
-              ],
+                          ),
+                          trailing: AnimatedBuilder(
+                            animation: _downloadService,
+                            builder: (ctx, _) {
+                              final p = _downloadService.getProgress(widget.book.id, ch.id);
+                              final isDownloading = p?.status == DownloadStatus.downloading;
+
+                              return Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    ch.durationText,
+                                    style: TextStyle(
+                                      color: isCurrent ? const Color(0xFFF5A623) : Colors.white38,
+                                      fontSize: 12,
+                                      fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                                    ),
+                                  ),
+                                  const SizedBox(width: 8),
+                                  if (isDownloading)
+                                    SizedBox(
+                                      width: 22,
+                                      height: 22,
+                                      child: CircularProgressIndicator(
+                                        value: p?.progressRatio,
+                                        strokeWidth: 2.4,
+                                        color: const Color(0xFFF5A623),
+                                      ),
+                                    )
+                                  else
+                                    FutureBuilder<bool>(
+                                      future: _downloadService.isChapterFullyDownloaded(
+                                        bookId: widget.book.id,
+                                        chapter: ch,
+                                        voiceKey: _selectedVoiceKey,
+                                        language: widget.book.activeAudioLanguage,
+                                      ),
+                                      builder: (ctx, snap) {
+                                        final isOffline = snap.data == true;
+                                        return IconButton(
+                                          visualDensity: VisualDensity.compact,
+                                          icon: Icon(
+                                            isOffline
+                                                ? Icons.check_circle_rounded
+                                                : Icons.download_for_offline_outlined,
+                                            size: 20,
+                                            color: isOffline ? Colors.greenAccent : Colors.white38,
+                                          ),
+                                          tooltip: isOffline
+                                              ? 'Descargado offline (Tocá para borrar)'
+                                              : 'Descargar capítulo',
+                                          onPressed: () async {
+                                            if (isOffline) {
+                                              await _downloadService.deleteChapterDownload(
+                                                bookId: widget.book.id,
+                                                chapter: ch,
+                                                voiceKey: _selectedVoiceKey,
+                                                language: widget.book.activeAudioLanguage,
+                                              );
+                                              if (mounted) {
+                                                ScaffoldMessenger.of(context).showSnackBar(
+                                                  SnackBar(
+                                                    content: Text('Descarga eliminada: ${ch.title}'),
+                                                    backgroundColor: Colors.white12,
+                                                    behavior: SnackBarBehavior.floating,
+                                                    duration: const Duration(seconds: 1),
+                                                  ),
+                                                );
+                                              }
+                                            } else {
+                                              _downloadService.downloadChapter(
+                                                bookId: widget.book.id,
+                                                chapter: ch,
+                                                voiceKey: _selectedVoiceKey,
+                                                language: widget.book.activeAudioLanguage,
+                                              );
+                                            }
+                                          },
+                                        );
+                                      },
+                                    ),
+                                ],
+                              );
+                            },
+                          ),
+                          onTap: () {
+                            Navigator.pop(context);
+                            _startChapterPlayback(ch, startSegment: 0);
+                          },
+                        ),
+                      );
+                    }),
+                  ],
+                );
+              },
             );
           },
         );
@@ -1698,20 +2235,132 @@ class _PlayerScreenState extends State<PlayerScreen>
     }
   }
 
+  void _showQuickOptionsSheet() {
+    final bool hasBilingual = widget.book.chapters.any(
+      (c) => c.originalLanguageSegments != null && c.originalLanguageSegments!.isNotEmpty,
+    );
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF141519),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Container(
+                  width: 40,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: Colors.white24,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                const SizedBox(height: 14),
+                ListTile(
+                  leading: Icon(
+                    _viewMode == 1 ? Icons.album_rounded : Icons.article_rounded,
+                    color: const Color(0xFFF5A623),
+                  ),
+                  title: Text(
+                    _viewMode == 1 ? 'Cambiar a Vista Portada' : 'Cambiar a Vista Texto Limpio',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    setState(() {
+                      _viewMode = _viewMode == 1 ? 0 : 1;
+                      _immersiveTextMode = false;
+                      _lastAutoScrolledSegment = -1;
+                    });
+                    if (_viewMode == 1) {
+                      _scrollToCurrentSegment(_currentSegmentIndex);
+                    }
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.auto_stories_rounded, color: Color(0xFFF5A623)),
+                  title: Text(
+                    'Ver documento original (${widget.book.fileType?.toUpperCase() ?? 'PDF'})',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _openDocumentViewer();
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.edit_note_rounded, color: Color(0xFFF5A623)),
+                  title: Text(
+                    _currentChapter.hasNote
+                        ? 'Ver / Editar nota de esta sección'
+                        : 'Escribir nota en esta sección',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _openChapterNoteEditor(_currentChapter);
+                  },
+                ),
+                ListTile(
+                  leading: const Icon(Icons.format_list_bulleted_rounded, color: Color(0xFFF5A623)),
+                  title: Text(
+                    'Capítulos del libro (${widget.book.chapters.length})',
+                    style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                  ),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showChaptersModal();
+                  },
+                ),
+                if (hasBilingual)
+                  ListTile(
+                    leading: const Icon(Icons.translate_rounded, color: Color(0xFFF5A623)),
+                    title: Text(
+                      widget.book.activeAudioLanguage == 'es'
+                          ? 'Cambiar audio a Inglés Original (🇺🇸 EN)'
+                          : 'Cambiar audio a Español (🇪🇸 ES)',
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.w600),
+                    ),
+                    onTap: () {
+                      Navigator.pop(ctx);
+                      _toggleAudioLanguage();
+                    },
+                  ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildTopBar() {
+    final bool hasBilingual = widget.book.detectedLanguage == 'en' ||
+        widget.book.chapters.any(
+          (c) => c.originalLanguageSegments != null && c.originalLanguageSegments!.isNotEmpty,
+        );
+
     return SafeArea(
       bottom: false,
       child: Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         child: Row(
           mainAxisAlignment: MainAxisAlignment.spaceBetween,
           children: [
             IconButton(
-              icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 32, color: Colors.white),
+              icon: const Icon(Icons.keyboard_arrow_down_rounded, size: 30, color: Colors.white),
+              tooltip: 'Minimizar',
               onPressed: () => Navigator.pop(context),
             ),
+            // Switch central Portada / Texto
             Container(
-              height: 38,
+              height: 36,
               padding: const EdgeInsets.all(3),
               decoration: BoxDecoration(
                 color: Colors.black.withValues(alpha: 0.45),
@@ -1734,17 +2383,18 @@ class _PlayerScreenState extends State<PlayerScreen>
                 ],
               ),
             ),
+            // Derecha: Botón directo Español <-> Inglés + Opciones/PDF
             Row(
               mainAxisSize: MainAxisSize.min,
               children: [
-                if (widget.book.chapters.any((c) => c.originalLanguageSegments != null && c.originalLanguageSegments!.isNotEmpty))
+                if (hasBilingual)
                   GestureDetector(
                     onTap: _toggleAudioLanguage,
                     child: Container(
-                      margin: const EdgeInsets.only(right: 6),
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                      margin: const EdgeInsets.only(right: 4),
+                      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 5),
                       decoration: BoxDecoration(
-                        color: const Color(0xFF2C2D32),
+                        color: const Color(0xFF1E2026),
                         borderRadius: BorderRadius.circular(14),
                         border: Border.all(
                           color: widget.book.activeAudioLanguage == 'es'
@@ -1755,8 +2405,8 @@ class _PlayerScreenState extends State<PlayerScreen>
                       child: Text(
                         widget.book.activeAudioLanguage == 'es' ? '🇪🇸 ES' : '🇺🇸 EN',
                         style: TextStyle(
-                          fontSize: 12,
-                          fontWeight: FontWeight.bold,
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w800,
                           color: widget.book.activeAudioLanguage == 'es'
                               ? const Color(0xFFF5A623)
                               : const Color(0xFF64B5F6),
@@ -1765,16 +2415,10 @@ class _PlayerScreenState extends State<PlayerScreen>
                     ),
                   ),
                 IconButton(
-                  icon: const Icon(Icons.auto_stories_rounded,
-                      size: 24, color: Color(0xFFF5A623)),
-                  tooltip:
-                      'Ver libro original (${widget.book.fileType?.toUpperCase() ?? 'PDF'})',
-                  onPressed: _openDocumentViewer,
-                ),
-                IconButton(
-                  icon: const Icon(Icons.queue_music_rounded, size: 26, color: Colors.white),
-                  tooltip: 'Capítulos',
-                  onPressed: _showChaptersModal,
+                  visualDensity: VisualDensity.compact,
+                  icon: const Icon(Icons.more_horiz_rounded, size: 25, color: Colors.white),
+                  tooltip: 'Opciones',
+                  onPressed: _showQuickOptionsSheet,
                 ),
               ],
             ),
@@ -1794,6 +2438,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       onTap: () {
         setState(() {
           _viewMode = index;
+          _immersiveTextMode = false;
           _lastAutoScrolledSegment = -1;
         });
         if (index == 1) {
@@ -1802,7 +2447,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       },
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+        padding: const EdgeInsets.symmetric(horizontal: 13, vertical: 5),
         decoration: BoxDecoration(
           color: selected ? const Color(0xFFF5A623) : Colors.transparent,
           borderRadius: BorderRadius.circular(20),
@@ -1811,10 +2456,10 @@ class _PlayerScreenState extends State<PlayerScreen>
           children: [
             Icon(
               icon,
-              size: 16,
+              size: 15,
               color: selected ? Colors.black : Colors.white60,
             ),
-            const SizedBox(width: 6),
+            const SizedBox(width: 5),
             Text(
               label,
               style: TextStyle(
@@ -1830,112 +2475,108 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   Widget _buildCoverModeView() {
-    final activeTrack = kAmbientTracks.firstWhere(
-      (t) => t.id == _selectedAmbientTrackId,
-      orElse: () => kAmbientTracks.first,
-    );
+    final Color primaryCoverColor = _ambientColors.first;
+    final Color secondaryCoverColor = _ambientColors.last;
 
     return LayoutBuilder(
       builder: (context, constraints) {
         final double maxH = constraints.maxHeight;
         final double maxW = constraints.maxWidth;
-        final double coverWidth = min(maxW * 0.72, maxH * 0.48).clamp(155.0, 285.0);
-        final double coverHeight = (coverWidth * 1.38).clamp(205.0, 370.0);
+        final double availableH = max(260.0, maxH - 235.0);
+        final double coverWidth = min(maxW * 0.66, availableH * 0.56).clamp(145.0, 245.0);
+        final double coverHeight = (coverWidth * 1.38).clamp(195.0, 330.0);
 
         return Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 26),
+          padding: const EdgeInsets.fromLTRB(26, 6, 26, 235),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
+              // Portada con halo reactivo de color de portada y ondas de audio estilo Spotify moderno
               Center(
-                child: AnimatedScale(
-                  scale: _isPlaying ? 1.0 : 0.94,
-                  duration: const Duration(milliseconds: 450),
-                  curve: Curves.easeOutBack,
-                  child: BookCoverWidget(
-                    book: widget.book,
-                    width: coverWidth,
-                    height: coverHeight,
-                    borderRadius: 18,
-                  ),
-                ),
-              ),
-              Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  GestureDetector(
-                    onTap: _showChaptersModal,
-                    child: Row(
+                child: AnimatedBuilder(
+                  animation: _ambientAnimController,
+                  builder: (context, child) {
+                    final double pulse = _isPlaying
+                        ? (0.96 + (_ambientAnimController.value * 0.08))
+                        : 0.92;
+                    return Stack(
+                      alignment: Alignment.center,
                       children: [
-                        Expanded(
-                          child: Text(
-                            _currentChapter.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: const TextStyle(
-                              fontSize: 21,
-                              fontWeight: FontWeight.w800,
-                              color: Colors.white,
-                              letterSpacing: -0.4,
-                              height: 1.2,
+                        // Halo difuso del color dominante de la portada
+                        Transform.scale(
+                          scale: pulse * 1.12,
+                          child: Container(
+                            width: coverWidth,
+                            height: coverHeight * 0.88,
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(32),
+                              boxShadow: [
+                                BoxShadow(
+                                  color: primaryCoverColor.withValues(
+                                    alpha: _isPlaying ? 0.65 : 0.32,
+                                  ),
+                                  blurRadius: 65,
+                                  spreadRadius: 14,
+                                ),
+                                BoxShadow(
+                                  color: const Color(0xFFF5A623).withValues(
+                                    alpha: _isPlaying ? 0.22 : 0.08,
+                                  ),
+                                  blurRadius: 45,
+                                  spreadRadius: 4,
+                                ),
+                              ],
                             ),
                           ),
                         ),
-                        const SizedBox(width: 6),
-                        const Icon(Icons.chevron_right_rounded, color: Colors.white70, size: 26),
+                        AnimatedScale(
+                          scale: _isPlaying ? 1.0 : 0.94,
+                          duration: const Duration(milliseconds: 420),
+                          curve: Curves.easeOutBack,
+                          child: BookCoverWidget(
+                            book: widget.book,
+                            width: coverWidth,
+                            height: coverHeight,
+                            borderRadius: 20,
+                          ),
+                        ),
                       ],
+                    );
+                  },
+                ),
+              ),
+              // Visualizador de ondas de audio estilo Spotify Canvas + Info limpia del libro
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildSpotifyAudioVisualizer(primaryCoverColor, secondaryCoverColor),
+                  const SizedBox(height: 12),
+                  Text(
+                    _currentChapter.title,
+                    textAlign: TextAlign.center,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 19,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.white,
+                      letterSpacing: -0.3,
                     ),
                   ),
-                  const SizedBox(height: 5),
+                  const SizedBox(height: 4),
                   Text(
                     _statusMessage.isNotEmpty
                         ? _statusMessage
-                        : '${widget.book.title} • ${_currentChapter.subtitle}',
+                        : '${widget.book.title} • Párr. ${_currentSegmentIndex + 1}/${max(1, _segments.length)}',
+                    textAlign: TextAlign.center,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
-                      fontSize: 13.5,
+                      fontSize: 13,
                       color: _statusMessage.isNotEmpty
                           ? const Color(0xFFF5A623)
-                          : Colors.white70,
+                          : Colors.white60,
                       fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  SingleChildScrollView(
-                    scrollDirection: Axis.horizontal,
-                    child: Row(
-                      children: [
-                        _buildYouTubeActionChip(
-                          icon: Icons.record_voice_over_rounded,
-                          label: _selectedVoiceName.split(' ').first,
-                          active: true,
-                          onTap: _showVoicesModal,
-                        ),
-                        const SizedBox(width: 8),
-                        _buildYouTubeActionChip(
-                          icon: activeTrack.icon,
-                          label: _ambientVolume > 0
-                              ? '${activeTrack.title.split(' ').first} ${(100 * _ambientVolume).round()}%'
-                              : 'Clásica Off',
-                          active: _ambientVolume > 0,
-                          onTap: _showLoFiModal,
-                        ),
-                        const SizedBox(width: 8),
-                        _buildYouTubeActionChip(
-                          icon: Icons.menu_book_rounded,
-                          label: 'Karaoke',
-                          active: false,
-                          onTap: () {
-                            setState(() {
-                              _viewMode = 1;
-                              _lastAutoScrolledSegment = -1;
-                            });
-                            _scrollToCurrentSegment(_currentSegmentIndex);
-                          },
-                        ),
-                      ],
                     ),
                   ),
                 ],
@@ -1947,161 +2588,41 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  Widget _buildYouTubeActionChip({
-    required IconData icon,
-    required String label,
-    required bool active,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(22),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-        decoration: BoxDecoration(
-          color: active
-              ? const Color(0xFFF5A623).withValues(alpha: 0.16)
-              : Colors.white.withValues(alpha: 0.08),
-          borderRadius: BorderRadius.circular(22),
-          border: Border.all(
-            color: active ? const Color(0xFFF5A623).withValues(alpha: 0.55) : Colors.white12,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              icon,
-              size: 16,
-              color: active ? const Color(0xFFF5A623) : Colors.white70,
-            ),
-            const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-                color: active ? Colors.white : Colors.white70,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+  Widget _buildSpotifyAudioVisualizer(Color c1, Color c2) {
+    // 21 barras simétricas que laten suavemente al ritmo de la voz cuando está reproduciendo
+    const List<double> baseHeights = [
+      0.22, 0.35, 0.50, 0.30, 0.68, 0.85, 0.52, 0.92, 0.64, 1.0,
+      0.75, 1.0, 0.64, 0.92, 0.52, 0.85, 0.68, 0.30, 0.50, 0.35, 0.22
+    ];
+    final double phase = (_position.inMilliseconds % 1200) / 1200.0;
 
-  Widget _buildKaraokeTextView() {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.fromLTRB(20, 10, 20, 24),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: List.generate(_segments.length, (idx) {
-          final bool isCurrentSeg = idx == _currentSegmentIndex;
-          final String segText = _segments[idx];
+    return SizedBox(
+      height: 28,
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: List.generate(baseHeights.length, (i) {
+          final double wave = _isPlaying
+              ? (0.45 + 0.55 * sin((phase * 2 * pi) + (i * 0.65)).abs())
+              : 0.22;
+          final double h = (26.0 * baseHeights[i] * wave).clamp(4.0, 26.0);
+          final bool isCenter = (i - 10).abs() <= 4;
 
-          if (!isCurrentSeg) {
-            return GestureDetector(
-              onTap: () => _playSegmentAtIndex(idx, _synthesisGeneration),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 6),
-                child: Text(
-                  segText,
-                  style: TextStyle(
-                    fontSize: 18,
-                    height: 1.62,
-                    color: idx < _currentSegmentIndex
-                        ? Colors.white.withValues(alpha: 0.45)
-                        : Colors.white.withValues(alpha: 0.72),
-                    fontWeight: FontWeight.w400,
-                  ),
-                ),
-              ),
-            );
-          }
-
-          final List<String> tokens =
-              segText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
-          final int activeWordIdx = _getActiveWordIndexForCurrentSegment(tokens);
-
-          return GestureDetector(
-            key: _activeSegmentKey,
-            onTap: () => _playSegmentAtIndex(idx, _synthesisGeneration),
-            child: Container(
-              margin: const EdgeInsets.symmetric(vertical: 10),
-              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 18),
-              decoration: BoxDecoration(
-                color: const Color(0xFF231D14).withValues(alpha: 0.92),
-                borderRadius: BorderRadius.circular(18),
-                border: Border.all(
-                  color: const Color(0xFFF5A623).withValues(alpha: 0.55),
-                  width: 1.3,
-                ),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFFF5A623).withValues(alpha: 0.10),
-                    blurRadius: 18,
-                    offset: const Offset(0, 4),
-                  ),
-                ],
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (_statusMessage.isNotEmpty)
-                    Padding(
-                      padding: const EdgeInsets.only(bottom: 8),
-                      child: Row(
-                        children: [
-                          const SizedBox(
-                            width: 12,
-                            height: 12,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: Color(0xFFF5A623),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: Text(
-                              _statusMessage,
-                              style: const TextStyle(
-                                color: Color(0xFFF5A623),
-                                fontSize: 12,
-                                fontWeight: FontWeight.w700,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  RichText(
-                    text: TextSpan(
-                      style: TextStyle(
-                        fontFamily: GoogleFonts.inter().fontFamily,
-                        fontSize: 18.5,
-                        height: 1.65,
-                      ),
-                      children: List.generate(tokens.length, (wIdx) {
-                        final bool isCurrentWord = wIdx == activeWordIdx;
-                        final bool isPastWord = wIdx < activeWordIdx;
-                        return TextSpan(
-                          text: '${tokens[wIdx]}${wIdx < tokens.length - 1 ? ' ' : ''}',
-                          style: TextStyle(
-                            color: isCurrentWord
-                                ? Colors.black
-                                : (isPastWord
-                                    ? Colors.white.withValues(alpha: 0.95)
-                                    : Colors.white.withValues(alpha: 0.78)),
-                            fontWeight: isCurrentWord ? FontWeight.w800 : FontWeight.w500,
-                            backgroundColor: isCurrentWord
-                                ? const Color(0xFFF5A623)
-                                : Colors.transparent,
-                          ),
-                        );
-                      }),
-                    ),
-                  ),
-                ],
+          return AnimatedContainer(
+            duration: const Duration(milliseconds: 140),
+            margin: const EdgeInsets.symmetric(horizontal: 2.2),
+            width: 3.2,
+            height: h,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(4),
+              gradient: LinearGradient(
+                begin: Alignment.bottomCenter,
+                end: Alignment.topCenter,
+                colors: _isPlaying
+                    ? [
+                        Color.lerp(c1, const Color(0xFFF5A623), 0.55)!,
+                        isCenter ? const Color(0xFFFFCA58) : Colors.white70,
+                      ]
+                    : [Colors.white24, Colors.white24],
               ),
             ),
           );
@@ -2110,8 +2631,149 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
+  Widget _buildKaraokeTextView() {
+    final int chNumber =
+        (widget.book.chapters.indexWhere((c) => c.id == _currentChapter.id) + 1)
+            .clamp(1, max(1, widget.book.chapters.length));
+    final String formattedChHeader =
+        '${chNumber.toString().padLeft(2, '0')}. ${_currentChapter.title.toUpperCase()}';
+
+    return GestureDetector(
+      behavior: HitTestBehavior.translucent,
+      onTap: () {
+        setState(() {
+          _immersiveTextMode = !_immersiveTextMode;
+        });
+      },
+      child: SingleChildScrollView(
+        padding: EdgeInsets.fromLTRB(
+          24,
+          _immersiveTextMode ? 56 : 16,
+          24,
+          _immersiveTextMode ? 80 : 270,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.only(bottom: 22),
+              child: Text(
+                formattedChHeader,
+                style: TextStyle(
+                  fontFamily: GoogleFonts.inter().fontFamily,
+                  fontSize: 22,
+                  fontWeight: FontWeight.w900,
+                  color: Colors.white,
+                  height: 1.25,
+                  letterSpacing: 0.3,
+                ),
+              ),
+            ),
+            if (_statusMessage.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 14),
+                child: Row(
+                  children: [
+                    const SizedBox(
+                      width: 12,
+                      height: 12,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        color: Color(0xFFF5A623),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        _statusMessage,
+                        style: const TextStyle(
+                          color: Color(0xFFF5A623),
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ...List.generate(_segments.length, (idx) {
+              final bool isCurrentSeg = idx == _currentSegmentIndex;
+              final String segText = _segments[idx];
+
+              if (!isCurrentSeg) {
+                return GestureDetector(
+                  onTap: () {
+                    if (_immersiveTextMode) {
+                      setState(() => _immersiveTextMode = false);
+                      return;
+                    }
+                    _playSegmentAtIndex(idx, _synthesisGeneration);
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 18),
+                    child: Text(
+                      segText,
+                      style: TextStyle(
+                        fontFamily: GoogleFonts.inter().fontFamily,
+                        fontSize: 19,
+                        height: 1.65,
+                        color: idx < _currentSegmentIndex
+                            ? Colors.white.withValues(alpha: 0.42)
+                            : Colors.white.withValues(alpha: 0.68),
+                        fontWeight: FontWeight.w400,
+                      ),
+                    ),
+                  ),
+                );
+              }
+
+              final List<String> tokens =
+                  segText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+              final int activeWordIdx = _getActiveWordIndexForCurrentSegment(tokens);
+
+              return GestureDetector(
+                key: _activeSegmentKey,
+                onTap: () {
+                  setState(() {
+                    _immersiveTextMode = !_immersiveTextMode;
+                  });
+                },
+                child: Padding(
+                  padding: const EdgeInsets.only(bottom: 18),
+                  child: RichText(
+                    text: TextSpan(
+                      style: TextStyle(
+                        fontFamily: GoogleFonts.inter().fontFamily,
+                        fontSize: 19,
+                        height: 1.65,
+                      ),
+                      children: List.generate(tokens.length, (wIdx) {
+                        final bool isCurrentWord = wIdx == activeWordIdx;
+                        return TextSpan(
+                          text: '${tokens[wIdx]}${wIdx < tokens.length - 1 ? ' ' : ''}',
+                          style: TextStyle(
+                            color: isCurrentWord
+                                ? const Color(0xFFFFCA58)
+                                : Colors.white.withValues(alpha: 0.96),
+                            fontWeight: isCurrentWord ? FontWeight.w800 : FontWeight.w400,
+                            backgroundColor: isCurrentWord
+                                ? const Color(0xFFF5A623).withValues(alpha: 0.34)
+                                : const Color(0xFFF5A623).withValues(alpha: 0.16),
+                          ),
+                        );
+                      }),
+                    ),
+                  ),
+                ),
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildUnifiedBottomControls() {
-    // Por defecto (_sliderShowsFullBook == false) la barra controla SOLO el capítulo actual para máxima precisión.
     final Duration baseElapsed =
         _sliderShowsFullBook ? _fullBookElapsedPosition : _chapterElapsedPosition;
     final Duration activeTotal =
@@ -2126,112 +2788,116 @@ class _PlayerScreenState extends State<PlayerScreen>
     final int remainingSec = max(0, activeTotal.inSeconds - activeElapsed.inSeconds);
     final int remMins = remainingSec ~/ 60;
     final String remainingShort = remMins >= 60
-        ? '${remMins ~/ 60}h ${remMins % 60}m'
-        : '${max(1, remMins)}m';
+        ? '${remMins ~/ 60}h ${remMins % 60}m rest.'
+        : '${remMins}m restantes';
 
-    final int bookPercent = ((_fullBookElapsedPosition.inSeconds /
-                max(1, _fullBookTotalDuration.inSeconds)) *
-            100)
-        .clamp(0.0, 100.0)
-        .round();
-
-    // Si está arrastrando en modo capítulo, calculamos a qué párrafo va a caer para mostrárselo en vivo
     String? draggingPreviewText;
     if (_draggingSliderSec != null && !_sliderShowsFullBook && _segments.isNotEmpty) {
       final ratio = (currentSliderSec / maxSliderSec).clamp(0.0, 0.999);
       final previewSeg = (ratio * _segments.length).floor() + 1;
       draggingPreviewText =
-          'Ir al Párrafo $previewSeg de ${_segments.length} • ${TextSanitizer.formatDuration(activeElapsed)}';
+          'Párrafo $previewSeg de ${_segments.length} • ${TextSanitizer.formatDuration(activeElapsed)}';
     }
 
-    final String centerBadgeLabel = draggingPreviewText ??
-        (_sliderShowsFullBook
-            ? 'Libro: $remainingShort rest. ($bookPercent%) ⇄'
-            : 'Cap: $remainingShort rest. • Libro $bookPercent% ⇄');
+    final int chNumber =
+        (widget.book.chapters.indexWhere((c) => c.id == _currentChapter.id) + 1)
+            .clamp(1, max(1, widget.book.chapters.length));
+    final String chapterPillTitle =
+        '${chNumber.toString().padLeft(2, '0')}. ${_currentChapter.title.toUpperCase()}';
 
     return Container(
-      padding: const EdgeInsets.fromLTRB(20, 10, 20, 16),
+      padding: const EdgeInsets.fromLTRB(20, 28, 20, 14),
       decoration: BoxDecoration(
-        color: const Color(0xFF101114).withValues(alpha: 0.95),
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        border: const Border(top: BorderSide(color: Colors.white10)),
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [
+            const Color(0xFF09090B).withValues(alpha: 0.0),
+            const Color(0xFF09090B).withValues(alpha: 0.86),
+            const Color(0xFF09090B).withValues(alpha: 0.98),
+            const Color(0xFF09090B),
+          ],
+          stops: const [0.0, 0.22, 0.48, 1.0],
+        ),
       ),
       child: SafeArea(
         top: false,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Barra de progreso de descarga si el libro completo o un capítulo se está descargando
-            AnimatedBuilder(
-              animation: _downloadService,
-              builder: (ctx, _) {
-                final bookDl = _downloadService.getBookDownloadProgress(widget.book.id);
-                if (bookDl == null) return const SizedBox.shrink();
-
-                return Padding(
-                  padding: const EdgeInsets.only(bottom: 6),
-                  child: Row(
-                    children: [
-                      const Icon(Icons.downloading_rounded, size: 14, color: Color(0xFFF5A623)),
-                      const SizedBox(width: 6),
-                      Expanded(
-                        child: Text(
-                          'Descargando audiolibro: capítulo ${bookDl.completed} de ${bookDl.total} (${(bookDl.ratio * 100).round()}%)',
-                          style: const TextStyle(
-                            color: Color(0xFFF5A623),
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w600,
+            Stack(
+              alignment: Alignment.center,
+              children: [
+                Align(
+                  alignment: Alignment.center,
+                  child: GestureDetector(
+                    onTap: _showChaptersModal,
+                    child: Container(
+                      constraints: const BoxConstraints(maxWidth: 270),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 9),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1A1B20).withValues(alpha: 0.94),
+                        borderRadius: BorderRadius.circular(24),
+                        border: Border.all(color: Colors.white12),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(
+                            Icons.drag_indicator_rounded,
+                            size: 15,
+                            color: Colors.white54,
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
-                        ),
+                          const SizedBox(width: 6),
+                          Flexible(
+                            child: Text(
+                              chapterPillTitle,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 11.5,
+                                fontWeight: FontWeight.w800,
+                                letterSpacing: 0.5,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                      const SizedBox(width: 8),
-                      SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(
-                          value: bookDl.ratio,
-                          strokeWidth: 2,
-                          color: const Color(0xFFF5A623),
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
-                );
-              },
-            ),
-            GestureDetector(
-              onTap: _showChaptersModal,
-              child: Padding(
-                padding: const EdgeInsets.only(bottom: 4),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Icon(Icons.format_list_bulleted_rounded,
-                        size: 16, color: Color(0xFFF5A623)),
-                    const SizedBox(width: 6),
-                    Flexible(
-                      child: Text(
-                        '${_currentChapter.title}  •  Párr. ${_currentSegmentIndex + 1}/${max(1, _segments.length)}',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 13,
-                          fontWeight: FontWeight.w700,
+                ),
+                if (_viewMode == 1)
+                  Align(
+                    alignment: Alignment.centerRight,
+                    child: GestureDetector(
+                      onTap: () {
+                        setState(() => _immersiveTextMode = true);
+                      },
+                      child: Container(
+                        width: 38,
+                        height: 38,
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF1A1B20).withValues(alpha: 0.94),
+                          shape: BoxShape.circle,
+                          border: Border.all(color: Colors.white12),
+                        ),
+                        child: const Icon(
+                          Icons.chrome_reader_mode_outlined,
+                          size: 18,
+                          color: Color(0xFFF5A623),
                         ),
                       ),
                     ),
-                  ],
-                ),
-              ),
+                  ),
+              ],
             ),
+            const SizedBox(height: 8),
             SliderTheme(
               data: SliderTheme.of(context).copyWith(
-                trackHeight: 4.5,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+                trackHeight: 3.0,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5.5),
+                overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
                 activeTrackColor: const Color(0xFFF5A623),
                 inactiveTrackColor: Colors.white24,
                 thumbColor: Colors.white,
@@ -2241,19 +2907,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                 min: 0.0,
                 max: maxSliderSec,
                 onChangeStart: (val) {
-                  setState(() {
-                    _draggingSliderSec = val;
-                  });
+                  setState(() => _draggingSliderSec = val);
                 },
                 onChanged: (val) {
-                  setState(() {
-                    _draggingSliderSec = val;
-                  });
+                  setState(() => _draggingSliderSec = val);
                 },
                 onChangeEnd: (val) {
-                  setState(() {
-                    _draggingSliderSec = null;
-                  });
+                  setState(() => _draggingSliderSec = null);
                   if (_sliderShowsFullBook) {
                     _seekAcrossFullBook(val);
                   } else {
@@ -2263,13 +2923,13 @@ class _PlayerScreenState extends State<PlayerScreen>
               ),
             ),
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 6),
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
                   Text(
                     TextSanitizer.formatDuration(activeElapsed),
-                    style: const TextStyle(color: Colors.white60, fontSize: 12),
+                    style: const TextStyle(color: Colors.white54, fontSize: 11.5),
                   ),
                   GestureDetector(
                     onTap: () {
@@ -2278,51 +2938,57 @@ class _PlayerScreenState extends State<PlayerScreen>
                         _sliderShowsFullBook = !_sliderShowsFullBook;
                       });
                     },
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.06),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Text(
-                        centerBadgeLabel,
-                        style: TextStyle(
-                          color: draggingPreviewText != null
-                              ? const Color(0xFFF5A623)
-                              : Colors.white70,
-                          fontSize: 11.5,
-                          fontWeight: draggingPreviewText != null
-                              ? FontWeight.w700
-                              : FontWeight.w500,
-                        ),
+                    child: Text(
+                      draggingPreviewText ?? remainingShort,
+                      style: TextStyle(
+                        color: draggingPreviewText != null
+                            ? const Color(0xFFF5A623)
+                            : Colors.white54,
+                        fontSize: 11.5,
+                        fontWeight: draggingPreviewText != null
+                            ? FontWeight.w700
+                            : FontWeight.w500,
                       ),
                     ),
                   ),
                   Text(
                     TextSanitizer.formatDuration(activeTotal),
-                    style: const TextStyle(color: Colors.white60, fontSize: 12),
+                    style: const TextStyle(color: Colors.white54, fontSize: 11.5),
                   ),
                 ],
               ),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                IconButton(
-                  icon: const Icon(Icons.skip_previous_rounded, size: 30, color: Colors.white),
-                  tooltip: 'Párrafo anterior',
-                  onPressed: () {
-                    if (_currentSegmentIndex > 0) {
-                      _playSegmentAtIndex(_currentSegmentIndex - 1, _synthesisGeneration);
-                    } else {
-                      final idx = widget.book.chapters
-                          .indexWhere((c) => c.id == _currentChapter.id);
-                      if (idx > 0) {
-                        _startChapterPlayback(widget.book.chapters[idx - 1]);
-                      }
-                    }
-                  },
+                GestureDetector(
+                  onTap: _showSleepTimerModal,
+                  behavior: HitTestBehavior.opaque,
+                  child: SizedBox(
+                    width: 52,
+                    height: 44,
+                    child: Center(
+                      child: audioPlayerService.isSleepTimerActive
+                          ? Text(
+                              audioPlayerService.sleepTimerBadgeText,
+                              style: const TextStyle(
+                                color: Color(0xFFF5A623),
+                                fontWeight: FontWeight.w900,
+                                fontSize: 12.5,
+                              ),
+                            )
+                          : const Text(
+                              'zZz',
+                              style: TextStyle(
+                                color: Colors.white70,
+                                fontWeight: FontWeight.w800,
+                                fontSize: 15,
+                                letterSpacing: -0.5,
+                              ),
+                            ),
+                    ),
+                  ),
                 ),
                 IconButton(
                   icon: const Icon(Icons.replay_10_rounded, size: 30, color: Colors.white),
@@ -2334,33 +3000,26 @@ class _PlayerScreenState extends State<PlayerScreen>
                 GestureDetector(
                   onTap: _togglePlayPause,
                   child: Container(
-                    width: 66,
-                    height: 66,
-                    decoration: BoxDecoration(
-                      color: const Color(0xFFF5A623),
+                    width: 64,
+                    height: 64,
+                    decoration: const BoxDecoration(
+                      color: Color(0xFFF5A623),
                       shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFFF5A623).withValues(alpha: 0.35),
-                          blurRadius: 16,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
                     ),
                     child: _isSynthesizing
                         ? const Center(
                             child: SizedBox(
-                              width: 28,
-                              height: 28,
+                              width: 26,
+                              height: 26,
                               child: CircularProgressIndicator(
                                 color: Colors.black,
-                                strokeWidth: 3,
+                                strokeWidth: 2.8,
                               ),
                             ),
                           )
                         : Icon(
                             _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                            size: 40,
+                            size: 36,
                             color: Colors.black,
                           ),
                   ),
@@ -2376,102 +3035,66 @@ class _PlayerScreenState extends State<PlayerScreen>
                     }
                   },
                 ),
-                InkWell(
+                GestureDetector(
                   onTap: _showSpeedModal,
-                  borderRadius: BorderRadius.circular(10),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.08),
-                      borderRadius: BorderRadius.circular(10),
-                      border: Border.all(color: Colors.white12),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          '${_playbackSpeed.toStringAsFixed(_playbackSpeed % 0.1 == 0 ? 1 : 2)}x',
-                          style: const TextStyle(
-                            fontWeight: FontWeight.w800,
-                            fontSize: 14.5,
-                            color: Color(0xFFF5A623),
-                          ),
+                  behavior: HitTestBehavior.opaque,
+                  child: SizedBox(
+                    width: 52,
+                    height: 44,
+                    child: Center(
+                      child: Text(
+                        '${_playbackSpeed.toStringAsFixed(_playbackSpeed % 0.1 == 0 ? 1 : 2)}x',
+                        style: TextStyle(
+                          fontWeight: FontWeight.w800,
+                          fontSize: 15,
+                          color: _playbackSpeed != 1.0
+                              ? const Color(0xFFF5A623)
+                              : Colors.white,
                         ),
-                        const Icon(
-                          Icons.arrow_drop_up_rounded,
-                          size: 16,
-                          color: Color(0xFFF5A623),
-                        ),
-                      ],
+                      ),
                     ),
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: 10),
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                InkWell(
-                  onTap: _showLoFiModal,
-                  borderRadius: BorderRadius.circular(20),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: _ambientVolume > 0
-                          ? const Color(0xFFF5A623).withValues(alpha: 0.16)
-                          : Colors.white10,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.piano_rounded,
-                          color: _ambientVolume > 0 ? const Color(0xFFF5A623) : Colors.white54,
-                          size: 17,
-                        ),
-                        const SizedBox(width: 5),
-                        Text(
-                          _ambientVolume > 0
-                              ? '${(_ambientVolume * 100).round()}%'
-                              : 'Off',
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.bold,
-                            color: _ambientVolume > 0 ? const Color(0xFFF5A623) : Colors.white54,
-                          ),
-                        ),
-                      ],
-                    ),
+                IconButton(
+                  icon: Icon(
+                    _ambientVolume > 0 ? Icons.volume_up_rounded : Icons.piano_rounded,
+                    color: _ambientVolume > 0 ? const Color(0xFFF5A623) : Colors.white70,
+                    size: 24,
                   ),
+                  tooltip: 'Música clásica de fondo',
+                  onPressed: _showLoFiModal,
                 ),
                 InkWell(
                   onTap: _showVoicesModal,
                   borderRadius: BorderRadius.circular(24),
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 9),
                     decoration: BoxDecoration(
-                      color: Colors.white.withValues(alpha: 0.08),
+                      color: const Color(0xFF1A1B20),
                       borderRadius: BorderRadius.circular(24),
-                      border: Border.all(
-                        color: const Color(0xFFF5A623).withValues(alpha: 0.4),
-                      ),
+                      border: Border.all(color: Colors.white12),
                     ),
                     child: Row(
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         const CircleAvatar(
-                          radius: 11,
+                          radius: 10,
                           backgroundColor: Color(0xFFF5A623),
-                          child: Icon(Icons.record_voice_over, size: 13, color: Colors.black),
+                          child: Icon(Icons.graphic_eq_rounded, size: 13, color: Colors.black),
                         ),
-                        const SizedBox(width: 8),
+                        const SizedBox(width: 9),
                         Text(
-                          _selectedVoiceName.split(' • ').first,
+                          _selectedVoiceName.split(' (').first,
                           style: const TextStyle(
                             color: Colors.white,
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
+                            fontSize: 13.5,
+                            fontWeight: FontWeight.w700,
                           ),
                         ),
                       ],
@@ -2479,20 +3102,17 @@ class _PlayerScreenState extends State<PlayerScreen>
                   ),
                 ),
                 IconButton(
-                  icon: const Icon(Icons.skip_next_rounded, color: Colors.white70, size: 26),
-                  tooltip: 'Siguiente párrafo',
-                  onPressed: () {
-                    if (_currentSegmentIndex + 1 < _segments.length) {
-                      _playSegmentAtIndex(_currentSegmentIndex + 1, _synthesisGeneration);
-                    } else {
-                      final currentIndex =
-                          widget.book.chapters.indexWhere((c) => c.id == _currentChapter.id);
-                      if (currentIndex != -1 &&
-                          currentIndex + 1 < widget.book.chapters.length) {
-                        _startChapterPlayback(widget.book.chapters[currentIndex + 1]);
-                      }
-                    }
-                  },
+                  icon: Icon(
+                    _currentChapter.hasNote
+                        ? Icons.sticky_note_2_rounded
+                        : Icons.edit_note_rounded,
+                    color: _currentChapter.hasNote
+                        ? const Color(0xFFF5A623)
+                        : Colors.white70,
+                    size: 25,
+                  ),
+                  tooltip: 'Nota de esta sección',
+                  onPressed: () => _openChapterNoteEditor(_currentChapter),
                 ),
               ],
             ),
@@ -2504,27 +3124,23 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   Widget build(BuildContext context) {
+    final bool hideChrome = _viewMode == 1 && _immersiveTextMode;
+
     return Scaffold(
-      backgroundColor: const Color(0xFF0D0E11),
+      backgroundColor: const Color(0xFF09090B),
       body: Stack(
         children: [
-          // La animación de fondo queda aislada en su propio RepaintBoundary y NO reconstruye el texto ni los controles
           Positioned.fill(
             child: RepaintBoundary(
               child: AnimatedBuilder(
                 animation: _ambientAnimController,
                 builder: (context, _) {
+                  if (_viewMode == 1) {
+                    return const ColoredBox(color: Color(0xFF09090B));
+                  }
                   final double t = _ambientAnimController.value;
                   final Color c1 = _ambientColors.first;
                   final Color c2 = _ambientColors.last;
-
-                  final List<Color> bgGradient = _viewMode == 0
-                      ? [c1, c2, const Color(0xFF0D0E11)]
-                      : const [
-                          Color(0xFF141311),
-                          Color(0xFF0E0E0F),
-                          Color(0xFF09090A),
-                        ];
 
                   return Stack(
                     children: [
@@ -2534,93 +3150,133 @@ class _PlayerScreenState extends State<PlayerScreen>
                             gradient: LinearGradient(
                               begin: Alignment(-0.8 + t * 1.2, -1.0),
                               end: Alignment(0.8 - t * 1.2, 1.0),
-                              colors: bgGradient,
+                              colors: [c1, c2, const Color(0xFF09090B)],
                               stops: const [0.0, 0.52, 1.0],
                             ),
                           ),
                         ),
                       ),
-                      if (_viewMode == 0)
-                        Positioned(
-                          top: 60 + (t * 45),
-                          left: 30 + ((1 - t) * 50),
-                          right: 30 + (t * 50),
-                          child: IgnorePointer(
-                            child: Container(
-                              height: 280,
-                              decoration: BoxDecoration(
-                                shape: BoxShape.circle,
-                                boxShadow: [
-                                  BoxShadow(
-                                    color: c1.withValues(alpha: 0.55),
-                                    blurRadius: 110,
-                                    spreadRadius: 35,
-                                  ),
-                                ],
-                              ),
+                      Positioned(
+                        top: 60 + (t * 45),
+                        left: 30 + ((1 - t) * 50),
+                        right: 30 + (t * 50),
+                        child: IgnorePointer(
+                          child: Container(
+                            height: 280,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              boxShadow: [
+                                BoxShadow(
+                                  color: c1.withValues(alpha: 0.55),
+                                  blurRadius: 110,
+                                  spreadRadius: 35,
+                                ),
+                              ],
                             ),
                           ),
                         ),
+                      ),
                     ],
                   );
                 },
               ),
             ),
           ),
-          Column(
-            children: [
-              _buildTopBar(),
-              ValueListenableBuilder<TranslationProgressInfo?>(
-                valueListenable: BookTranslationService.progressNotifier,
-                builder: (context, info, _) {
-                  if (info == null || info.bookId != widget.book.id) {
-                    return const SizedBox.shrink();
-                  }
-                  return Container(
-                    margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF1E1E24).withValues(alpha: 0.92),
-                      borderRadius: BorderRadius.circular(16),
-                      border: Border.all(
-                        color: info.isCompleted ? const Color(0xFF81C784) : const Color(0xFFF5A623).withValues(alpha: 0.4),
-                      ),
-                    ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (!info.isCompleted)
-                          const SizedBox(
-                            width: 14,
-                            height: 14,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Color(0xFFF5A623)),
-                          )
-                        else
-                          const Icon(Icons.check_circle_rounded, size: 16, color: Color(0xFF81C784)),
-                        const SizedBox(width: 8),
-                        Text(
-                          info.statusText,
-                          style: TextStyle(
-                            fontSize: 11.5,
-                            fontWeight: FontWeight.w600,
-                            color: info.isCompleted ? const Color(0xFF81C784) : Colors.white70,
-                          ),
+          Positioned.fill(
+            child: Column(
+              children: [
+                AnimatedSize(
+                  duration: const Duration(milliseconds: 240),
+                  curve: Curves.easeOutCubic,
+                  child: hideChrome
+                      ? const SizedBox(height: 12)
+                      : Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            _buildTopBar(),
+                            ValueListenableBuilder<TranslationProgressInfo?>(
+                              valueListenable: BookTranslationService.progressNotifier,
+                              builder: (context, info, _) {
+                                if (info == null || info.bookId != widget.book.id) {
+                                  return const SizedBox.shrink();
+                                }
+                                return Container(
+                                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                                  decoration: BoxDecoration(
+                                    color: const Color(0xFF1E1E24).withValues(alpha: 0.92),
+                                    borderRadius: BorderRadius.circular(16),
+                                    border: Border.all(
+                                      color: info.isCompleted
+                                          ? const Color(0xFF81C784)
+                                          : const Color(0xFFF5A623).withValues(alpha: 0.4),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      if (!info.isCompleted)
+                                        const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                            color: Color(0xFFF5A623),
+                                          ),
+                                        )
+                                      else
+                                        const Icon(
+                                          Icons.check_circle_rounded,
+                                          size: 16,
+                                          color: Color(0xFF81C784),
+                                        ),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        info.statusText,
+                                        style: TextStyle(
+                                          fontSize: 11.5,
+                                          fontWeight: FontWeight.w600,
+                                          color: info.isCompleted
+                                              ? const Color(0xFF81C784)
+                                              : Colors.white70,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                );
+                              },
+                            ),
+                          ],
                         ),
-                      ],
-                    ),
-                  );
-                },
-              ),
-              Expanded(
-                child: AnimatedSwitcher(
-                  duration: const Duration(milliseconds: 280),
-                  child: _viewMode == 0
-                      ? _buildCoverModeView()
-                      : _buildKaraokeTextView(),
+                ),
+                Expanded(
+                  child: AnimatedSwitcher(
+                    duration: const Duration(milliseconds: 260),
+                    child: _viewMode == 0
+                        ? _buildCoverModeView()
+                        : _buildKaraokeTextView(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Positioned(
+            left: 0,
+            right: 0,
+            bottom: 0,
+            child: IgnorePointer(
+              ignoring: hideChrome,
+              child: AnimatedSlide(
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.easeOutCubic,
+                offset: hideChrome ? const Offset(0, 1.05) : Offset.zero,
+                child: AnimatedOpacity(
+                  duration: const Duration(milliseconds: 220),
+                  opacity: hideChrome ? 0.0 : 1.0,
+                  child: _buildUnifiedBottomControls(),
                 ),
               ),
-              _buildUnifiedBottomControls(),
-            ],
+            ),
           ),
         ],
       ),

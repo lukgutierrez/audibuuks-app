@@ -56,7 +56,7 @@ class TtsSynthesisService {
         ? '_h${text.trim().replaceAll(RegExp(r'\s+'), ' ').toLowerCase().hashCode.abs().toRadixString(16)}'
         : '';
     final langTag = voiceKey.startsWith('en-') ? 'en' : 'es';
-    return '${bookId}_ch${chapter.id}_s${segIdx}_${voiceKey}_${langTag}$textHash\_hd96_v4';
+    return '${bookId}_ch${chapter.id}_s${segIdx}_${voiceKey}_$langTag${textHash}_hd96_v5';
   }
 
   void _putTimingsInRamCache(String key, List<WordTimingItem> timings) {

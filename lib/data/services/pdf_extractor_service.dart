@@ -110,7 +110,11 @@ class PdfExtractorService {
 
       int reportInterval = max(1, totalPages ~/ 25);
       for (int p = 0; p < totalPages; p++) {
-        final raw = extractor.extractText(startPageIndex: p, endPageIndex: p);
+        final raw = extractor.extractText(
+          startPageIndex: p,
+          endPageIndex: p,
+          layoutText: true,
+        );
         if (!_isTableOfContentsPage(raw) && !TextSanitizer.isLegalCopyrightPage(raw)) {
           final cleaned = TextSanitizer.sanitizeExtractedText(raw);
           pageTexts[p] = cleaned;

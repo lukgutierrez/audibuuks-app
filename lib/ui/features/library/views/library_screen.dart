@@ -485,7 +485,7 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
                     padding: const EdgeInsets.all(8),
                     child: Image.asset(
                       'assets/icons/google_drive.png',
-                      errorBuilder: (ctx, _, __) => const Icon(
+                      errorBuilder: (ctx, _, _) => const Icon(
                         Icons.add_to_drive_rounded,
                         color: Color(0xFF4285F4),
                         size: 26,

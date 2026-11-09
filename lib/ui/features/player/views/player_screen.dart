@@ -14,11 +14,15 @@ import '../../../../data/services/cover_service.dart';
 import '../../../../data/services/native_channel_service.dart';
 import '../../../../data/services/offline_download_service.dart';
 import '../../../../data/services/tts_synthesis_service.dart';
-import '../../../../domain/models/ambient_track_info.dart';
 import '../../../../domain/models/book_item.dart';
 import '../../../../domain/models/chapter_item.dart';
 import '../../../shared/widgets/book_cover_widget.dart';
 import '../../reader/views/document_viewer_screen.dart';
+import '../widgets/ambient_music_sheet.dart';
+import '../widgets/chapters_list_sheet.dart';
+import '../widgets/sleep_timer_sheet.dart';
+import '../widgets/spotify_audio_visualizer.dart';
+import '../widgets/voices_selector_sheet.dart';
 import 'chapter_note_editor_sheet.dart';
 
 class PlayerScreen extends StatefulWidget {
@@ -995,15 +999,6 @@ class _PlayerScreenState extends State<PlayerScreen>
   }
 
   void _showSleepTimerModal() {
-    final timePresets = <Map<String, dynamic>>[
-      {'mins': 5, 'label': '5 min', 'desc': 'Breve'},
-      {'mins': 15, 'label': '15 min', 'desc': 'Siesta'},
-      {'mins': 30, 'label': '30 min', 'desc': 'Ideal'},
-      {'mins': 45, 'label': '45 min', 'desc': 'Relajado'},
-      {'mins': 60, 'label': '60 min', 'desc': '1 hora'},
-      {'mins': 90, 'label': '90 min', 'desc': '1h 30m'},
-    ];
-
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF16181D),
@@ -1011,248 +1006,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
-      builder: (_) {
-        return AnimatedBuilder(
-          animation: audioPlayerService,
-          builder: (ctx, _) {
-            final bool isActive = audioPlayerService.isSleepTimerActive;
-            final bool isEndChap = audioPlayerService.sleepAtEndOfChapter;
-            final int? remSec = audioPlayerService.sleepRemainingSeconds;
-
-            return SafeArea(
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(22, 14, 22, 26),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 42,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.white24,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Row(
-                          children: [
-                            Icon(Icons.bedtime_rounded, color: Color(0xFFF5A623), size: 24),
-                            SizedBox(width: 10),
-                            Text(
-                              'Temporizador de Sueño',
-                              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
-                            ),
-                          ],
-                        ),
-                        Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-                          decoration: BoxDecoration(
-                            color: isActive
-                                ? const Color(0xFFF5A623).withValues(alpha: 0.18)
-                                : Colors.white10,
-                            borderRadius: BorderRadius.circular(14),
-                            border: Border.all(
-                              color: isActive ? const Color(0xFFF5A623) : Colors.white24,
-                            ),
-                          ),
-                          child: Text(
-                            isActive ? '🌙 ${audioPlayerService.sleepTimerBadgeText}' : 'Apagado',
-                            style: TextStyle(
-                              color: isActive ? const Color(0xFFF5A623) : Colors.white60,
-                              fontWeight: FontWeight.w800,
-                              fontSize: 13.5,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    const Text(
-                      'Atenúa suavemente la voz y el piano en los últimos 10 segundos antes de pausar y guardar tu posición.',
-                      style: TextStyle(color: Colors.white54, fontSize: 12.5, height: 1.35),
-                    ),
-                    const SizedBox(height: 16),
-                    // Opción destacada: Al terminar el capítulo actual
-                    InkWell(
-                      borderRadius: BorderRadius.circular(16),
-                      onTap: () {
-                        if (isEndChap) {
-                          audioPlayerService.cancelSleepTimer();
-                        } else {
-                          audioPlayerService.startSleepAtEndOfChapter();
-                        }
-                      },
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
-                        decoration: BoxDecoration(
-                          color: isEndChap
-                              ? const Color(0xFFF5A623).withValues(alpha: 0.18)
-                              : Colors.white.withValues(alpha: 0.05),
-                          borderRadius: BorderRadius.circular(16),
-                          border: Border.all(
-                            color: isEndChap ? const Color(0xFFF5A623) : Colors.white12,
-                            width: isEndChap ? 1.5 : 1.0,
-                          ),
-                        ),
-                        child: Row(
-                          children: [
-                            CircleAvatar(
-                              radius: 19,
-                              backgroundColor: isEndChap
-                                  ? const Color(0xFFF5A623)
-                                  : Colors.white10,
-                              child: Icon(
-                                Icons.auto_stories_rounded,
-                                size: 20,
-                                color: isEndChap ? Colors.black : const Color(0xFFF5A623),
-                              ),
-                            ),
-                            const SizedBox(width: 14),
-                            Expanded(
-                              child: Column(
-                                crossAxisAlignment: CrossAxisAlignment.start,
-                                children: [
-                                  Text(
-                                    'Al terminar este capítulo',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w800,
-                                      fontSize: 14.5,
-                                      color: isEndChap ? const Color(0xFFF5A623) : Colors.white,
-                                    ),
-                                  ),
-                                  const SizedBox(height: 2),
-                                  Text(
-                                    'Detiene la lectura justo al concluir "${_currentChapter.title}"',
-                                    maxLines: 1,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: const TextStyle(color: Colors.white60, fontSize: 12),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            Icon(
-                              isEndChap
-                                  ? Icons.check_circle_rounded
-                                  : Icons.radio_button_unchecked_rounded,
-                              color: isEndChap ? const Color(0xFFF5A623) : Colors.white38,
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 14),
-                    GridView.count(
-                      crossAxisCount: 3,
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      mainAxisSpacing: 10,
-                      crossAxisSpacing: 10,
-                      childAspectRatio: 2.1,
-                      children: timePresets.map((p) {
-                        final int mins = p['mins'] as int;
-                        final bool selected = !isEndChap &&
-                            remSec != null &&
-                            (remSec - (mins * 60)).abs() <= 45;
-                        return InkWell(
-                          borderRadius: BorderRadius.circular(14),
-                          onTap: () {
-                            audioPlayerService.startSleepTimerMinutes(mins);
-                          },
-                          child: Container(
-                            decoration: BoxDecoration(
-                              color: selected
-                                  ? const Color(0xFFF5A623)
-                                  : Colors.white.withValues(alpha: 0.06),
-                              borderRadius: BorderRadius.circular(14),
-                              border: Border.all(
-                                color: selected ? const Color(0xFFF5A623) : Colors.white12,
-                              ),
-                            ),
-                            child: Column(
-                              mainAxisAlignment: MainAxisAlignment.center,
-                              children: [
-                                Text(
-                                  p['label'] as String,
-                                  style: TextStyle(
-                                    fontWeight: FontWeight.w800,
-                                    fontSize: 14,
-                                    color: selected ? Colors.black : Colors.white,
-                                  ),
-                                ),
-                                const SizedBox(height: 2),
-                                Text(
-                                  p['desc'] as String,
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: selected ? Colors.black87 : Colors.white54,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        );
-                      }).toList(),
-                    ),
-                    if (isActive) ...[
-                      const SizedBox(height: 16),
-                      Row(
-                        children: [
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              style: OutlinedButton.styleFrom(
-                                foregroundColor: const Color(0xFFF5A623),
-                                side: const BorderSide(color: Color(0xFFF5A623)),
-                                padding: const EdgeInsets.symmetric(vertical: 12),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                              ),
-                              onPressed: () => audioPlayerService.addSleepTimerMinutes(5),
-                              icon: const Icon(Icons.add_alarm_rounded, size: 18),
-                              label: const Text(
-                                '+5 min más',
-                                style: TextStyle(fontWeight: FontWeight.w800),
-                              ),
-                            ),
-                          ),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: FilledButton.tonalIcon(
-                              style: FilledButton.styleFrom(
-                                backgroundColor: Colors.redAccent.withValues(alpha: 0.18),
-                                foregroundColor: Colors.redAccent,
-                                padding: const EdgeInsets.symmetric(vertical: 12),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(14),
-                                ),
-                              ),
-                              onPressed: () {
-                                audioPlayerService.cancelSleepTimer();
-                                Navigator.pop(ctx);
-                              },
-                              icon: const Icon(Icons.timer_off_rounded, size: 18),
-                              label: const Text(
-                                'Desactivar',
-                                style: TextStyle(fontWeight: FontWeight.w800),
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ],
-                  ],
-                ),
-              ),
-            );
-          },
-        );
-      },
+      builder: (_) => SleepTimerSheet(currentChapter: _currentChapter),
     );
   }
 
@@ -1264,266 +1018,34 @@ class _PlayerScreenState extends State<PlayerScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(28)),
       ),
-      builder: (_) {
-        return StatefulBuilder(
-          builder: (ctx, setModalState) {
-            return DraggableScrollableSheet(
-              expand: false,
-              initialChildSize: 0.65,
-              minChildSize: 0.48,
-              maxChildSize: 0.85,
-              builder: (_, scrollController) {
-                return ListView(
-                  controller: scrollController,
-                  padding: const EdgeInsets.fromLTRB(22, 14, 22, 30),
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 44,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.white24,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 18),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        const Row(
-                          children: [
-                            Icon(Icons.piano_rounded, color: Color(0xFFF5A623), size: 24),
-                            SizedBox(width: 10),
-                            Text(
-                              'Música Clásica Instrumental',
-                              style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
-                            ),
-                          ],
-                        ),
-                        Switch(
-                          value: _ambientVolume > 0,
-                          activeThumbColor: const Color(0xFFF5A623),
-                          onChanged: (enabled) {
-                            final newVol = enabled ? 0.25 : 0.0;
-                            setModalState(() {});
-                            setState(() => _ambientVolume = newVol);
-                            _repository.savePlayerPreferences(ambientVolume: newVol);
-                            if (newVol > 0 && _isPlaying) {
-                              NativeChannelService.selectAndPlayTrack(
-                                _selectedAmbientTrackId,
-                                newVol,
-                                shouldPlayNow: true,
-                              );
-                            } else {
-                              NativeChannelService.setLoFiVolume(newVol);
-                              NativeChannelService.pauseLoFi();
-                            }
-                          },
-                        ),
-                      ],
-                    ),
-                    const Text(
-                      'Arpegios acústicos puros de piano y arpa sin ruido de fondo. Se pausa automáticamente al pausar la lectura.',
-                      style: TextStyle(color: Colors.white60, fontSize: 12.5),
-                    ),
-                    const SizedBox(height: 16),
-                    Container(
-                      padding: const EdgeInsets.all(14),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.05),
-                        borderRadius: BorderRadius.circular(16),
-                        border: Border.all(color: Colors.white10),
-                      ),
-                      child: Column(
-                        children: [
-                          Row(
-                            children: [
-                              Icon(
-                                _ambientVolume > 0
-                                    ? Icons.volume_up_rounded
-                                    : Icons.volume_off_rounded,
-                                color: const Color(0xFFF5A623),
-                              ),
-                              Expanded(
-                                child: Slider(
-                                  value: _ambientVolume,
-                                  min: 0.0,
-                                  max: 1.0,
-                                  activeColor: const Color(0xFFF5A623),
-                                  inactiveColor: Colors.white12,
-                                  onChanged: (val) {
-                                    setModalState(() {});
-                                    setState(() => _ambientVolume = val);
-                                    _repository.savePlayerPreferences(ambientVolume: val);
-                                    NativeChannelService.setLoFiVolume(val);
-                                    if (val > 0 && _isPlaying) {
-                                      NativeChannelService.playLoFi();
-                                    } else if (val == 0) {
-                                      NativeChannelService.pauseLoFi();
-                                    }
-                                  },
-                                ),
-                              ),
-                              SizedBox(
-                                width: 46,
-                                child: Text(
-                                  '${(_ambientVolume * 100).round()}%',
-                                  textAlign: TextAlign.right,
-                                  style: const TextStyle(
-                                    color: Color(0xFFF5A623),
-                                    fontWeight: FontWeight.w800,
-                                    fontSize: 14,
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 6),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            children: [
-                              _buildVolumePresetChip('Silencio', 0.0, setModalState),
-                              _buildVolumePresetChip('Sutil 15%', 0.15, setModalState),
-                              _buildVolumePresetChip('Armónico 30%', 0.30, setModalState),
-                              _buildVolumePresetChip('Envolvente 55%', 0.55, setModalState),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    ...kAmbientTracks.map((track) {
-                      final isSelected = _selectedAmbientTrackId == track.id;
-                      return Padding(
-                        padding: const EdgeInsets.only(bottom: 10),
-                        child: InkWell(
-                          borderRadius: BorderRadius.circular(16),
-                          onTap: () {
-                            final vol = _ambientVolume > 0 ? _ambientVolume : 0.25;
-                            setModalState(() {
-                              _selectedAmbientTrackId = track.id;
-                              _ambientVolume = vol;
-                            });
-                            setState(() {
-                              _selectedAmbientTrackId = track.id;
-                              _ambientVolume = vol;
-                            });
-                            _repository.savePlayerPreferences(
-                              ambientTrackId: track.id,
-                              ambientVolume: vol,
-                            );
-                            NativeChannelService.selectAndPlayTrack(
-                              track.id,
-                              vol,
-                              shouldPlayNow: _isPlaying,
-                            );
-                          },
-                          child: Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: isSelected
-                                  ? const Color(0xFFF5A623).withValues(alpha: 0.15)
-                                  : Colors.white.withValues(alpha: 0.04),
-                              borderRadius: BorderRadius.circular(16),
-                              border: Border.all(
-                                color: isSelected
-                                    ? const Color(0xFFF5A623)
-                                    : Colors.white12,
-                                width: isSelected ? 1.4 : 1.0,
-                              ),
-                            ),
-                            child: Row(
-                              children: [
-                                CircleAvatar(
-                                  radius: 21,
-                                  backgroundColor: isSelected
-                                      ? const Color(0xFFF5A623)
-                                      : Colors.white10,
-                                  child: Icon(
-                                    track.icon,
-                                    color: isSelected ? Colors.black : Colors.white70,
-                                  ),
-                                ),
-                                const SizedBox(width: 14),
-                                Expanded(
-                                  child: Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      Text(
-                                        track.title,
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w700,
-                                          fontSize: 15,
-                                          color: isSelected
-                                              ? const Color(0xFFF5A623)
-                                              : Colors.white,
-                                        ),
-                                      ),
-                                      const SizedBox(height: 3),
-                                      Text(
-                                        track.subtitle,
-                                        style: const TextStyle(
-                                          color: Colors.white60,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                                Icon(
-                                  isSelected
-                                      ? Icons.check_circle_rounded
-                                      : Icons.radio_button_unchecked_rounded,
-                                  color: isSelected
-                                      ? const Color(0xFFF5A623)
-                                      : Colors.white38,
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      );
-                    }),
-                  ],
-                );
-              },
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildVolumePresetChip(String label, double val, StateSetter setModalState) {
-    final bool active = (_ambientVolume - val).abs() < 0.04;
-    return InkWell(
-      onTap: () {
-        setModalState(() {});
-        setState(() => _ambientVolume = val);
-        _repository.savePlayerPreferences(ambientVolume: val);
-        NativeChannelService.setLoFiVolume(val);
-        if (val > 0 && _isPlaying) {
-          NativeChannelService.playLoFi();
-        } else if (val == 0) {
-          NativeChannelService.pauseLoFi();
-        }
-      },
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-        decoration: BoxDecoration(
-          color: active ? const Color(0xFFF5A623) : Colors.white10,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Text(
-          label,
-          style: TextStyle(
-            fontSize: 11.5,
-            fontWeight: FontWeight.bold,
-            color: active ? Colors.black : Colors.white70,
-          ),
-        ),
+      builder: (_) => AmbientMusicSheet(
+        initialVolume: _ambientVolume,
+        initialTrackId: _selectedAmbientTrackId,
+        onVolumeChanged: (val) {
+          setState(() => _ambientVolume = val);
+          _repository.savePlayerPreferences(ambientVolume: val);
+          NativeChannelService.setLoFiVolume(val);
+          if (val > 0 && _isPlaying) {
+            NativeChannelService.playLoFi();
+          } else if (val == 0) {
+            NativeChannelService.pauseLoFi();
+          }
+        },
+        onTrackSelected: (trackId, vol) {
+          setState(() {
+            _selectedAmbientTrackId = trackId;
+            _ambientVolume = vol;
+          });
+          _repository.savePlayerPreferences(
+            ambientTrackId: trackId,
+            ambientVolume: vol,
+          );
+          NativeChannelService.selectAndPlayTrack(
+            trackId,
+            vol,
+            shouldPlayNow: _isPlaying,
+          );
+        },
       ),
     );
   }
@@ -1536,119 +1058,23 @@ class _PlayerScreenState extends State<PlayerScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (_) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 26),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: Colors.white24,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              const Text(
-                'Narradores Neuronales HD (96 kbps)',
-                style: TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
-              ),
-              const SizedBox(height: 4),
-              const Text(
-                'Se guarda automáticamente tu voz elegida para todos tus libros',
-                style: TextStyle(color: Colors.white54, fontSize: 12.5),
-              ),
-              const SizedBox(height: 12),
-              Flexible(
-                child: SingleChildScrollView(
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      const Padding(
-                        padding: EdgeInsets.only(top: 8, bottom: 4),
-                        child: Text(
-                          '🇪🇸 VOCES EN ESPAÑOL',
-                          style: TextStyle(
-                            color: Color(0xFFEAA036),
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 1.1,
-                          ),
-                        ),
-                      ),
-                      ...TtsSynthesisService.voicesMap.entries
-                          .where((e) => e.key.startsWith('es-'))
-                          .map((entry) => _buildVoiceTile(entry)),
-                      const Padding(
-                        padding: EdgeInsets.only(top: 14, bottom: 4),
-                        child: Text(
-                          '🇺🇸 VOCES EN INGLÉS (ENGLISH HD)',
-                          style: TextStyle(
-                            color: Color(0xFF64B5F6),
-                            fontSize: 12,
-                            fontWeight: FontWeight.bold,
-                            letterSpacing: 1.1,
-                          ),
-                        ),
-                      ),
-                      ...TtsSynthesisService.voicesMap.entries
-                          .where((e) => e.key.startsWith('en-'))
-                          .map((entry) => _buildVoiceTile(entry)),
-                    ],
-                  ),
-                ),
-              ),
-            ],
-          ),
-        );
-      },
-    );
-  }
-
-  Widget _buildVoiceTile(MapEntry<String, String> entry) {
-    final isSelected = _selectedVoiceKey == entry.key;
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: CircleAvatar(
-        backgroundColor: isSelected
-            ? const Color(0xFFF5A623)
-            : const Color(0xFF2C2D32),
-        child: Icon(
-          Icons.record_voice_over,
-          color: isSelected ? Colors.black : Colors.white,
-        ),
+      builder: (_) => VoicesSelectorSheet(
+        selectedVoiceKey: _selectedVoiceKey,
+        onVoiceSelected: (voiceKey, voiceName) {
+          setState(() {
+            _selectedVoiceKey = voiceKey;
+            _selectedVoiceName = voiceName;
+          });
+          _repository.savePlayerPreferences(
+            voiceKey: voiceKey,
+            voiceName: voiceName,
+          );
+          _startChapterPlayback(
+            _currentChapter,
+            startSegment: _currentSegmentIndex,
+          );
+        },
       ),
-      title: Text(
-        entry.value,
-        style: TextStyle(
-          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-          color: isSelected ? const Color(0xFFF5A623) : Colors.white,
-        ),
-      ),
-      trailing: isSelected
-          ? const Icon(Icons.check_circle_rounded, color: Color(0xFFF5A623))
-          : null,
-      onTap: () {
-        setState(() {
-          _selectedVoiceKey = entry.key;
-          _selectedVoiceName = entry.value;
-        });
-        _repository.savePlayerPreferences(
-          voiceKey: entry.key,
-          voiceName: entry.value,
-        );
-        Navigator.pop(context);
-        _startChapterPlayback(
-          _currentChapter,
-          startSegment: _currentSegmentIndex,
-        );
-      },
     );
   }
 
@@ -1681,18 +1107,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     );
   }
 
-  String _cleanNotePreview(String raw) {
-    return raw
-        .replaceAll('**', '')
-        .replaceAll('__', '')
-        .replaceAll(RegExp(r'^#\s+', multiLine: true), '')
-        .replaceAll(RegExp(r'\s+'), ' ')
-        .trim();
-  }
-
   void _showChaptersModal() {
-    final currentChIdx =
-        widget.book.chapters.indexWhere((c) => c.id == _currentChapter.id);
     final bookElapsedSec = _fullBookElapsedPosition.inSeconds;
     final bookTotalSec = max(1, _fullBookTotalDuration.inSeconds);
     final bookPercent = ((bookElapsedSec / bookTotalSec) * 100).clamp(0.0, 100.0).round();
@@ -1704,433 +1119,18 @@ class _PlayerScreenState extends State<PlayerScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
       ),
-      builder: (_) {
-        return StatefulBuilder(
-          builder: (modalCtx, setModalState) {
-            final int notesCount =
-                widget.book.chapters.where((c) => c.hasNote).length;
-
-            return DraggableScrollableSheet(
-              expand: false,
-              initialChildSize: 0.76,
-              minChildSize: 0.45,
-              maxChildSize: 0.94,
-              builder: (_, scrollController) {
-                return ListView(
-                  controller: scrollController,
-                  padding: const EdgeInsets.all(20),
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 40,
-                        height: 4,
-                        decoration: BoxDecoration(
-                          color: Colors.white24,
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                      children: [
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              'Capítulos (${widget.book.chapters.length})',
-                              style: const TextStyle(fontWeight: FontWeight.w800, fontSize: 18),
-                            ),
-                            if (notesCount > 0) ...[
-                              const SizedBox(width: 8),
-                              Container(
-                                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                decoration: BoxDecoration(
-                                  color: const Color(0xFFF5A623).withValues(alpha: 0.18),
-                                  borderRadius: BorderRadius.circular(10),
-                                  border: Border.all(
-                                    color: const Color(0xFFF5A623).withValues(alpha: 0.45),
-                                  ),
-                                ),
-                                child: Row(
-                                  mainAxisSize: MainAxisSize.min,
-                                  children: [
-                                    const Icon(
-                                      Icons.sticky_note_2_rounded,
-                                      size: 13,
-                                      color: Color(0xFFF5A623),
-                                    ),
-                                    const SizedBox(width: 4),
-                                    Text(
-                                      '$notesCount ${notesCount == 1 ? 'nota' : 'notas'}',
-                                      style: const TextStyle(
-                                        color: Color(0xFFF5A623),
-                                        fontSize: 11,
-                                        fontWeight: FontWeight.w800,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
-                          ],
-                        ),
-                        Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            AnimatedBuilder(
-                              animation: _downloadService,
-                              builder: (ctx, _) {
-                                final bookDl = _downloadService.getBookDownloadProgress(widget.book.id);
-                                final bool isBookDl = bookDl != null;
-
-                                return FilledButton.tonalIcon(
-                                  style: FilledButton.styleFrom(
-                                    backgroundColor: isBookDl
-                                        ? const Color(0xFFF5A623).withValues(alpha: 0.28)
-                                        : const Color(0xFFF5A623).withValues(alpha: 0.16),
-                                    foregroundColor: const Color(0xFFF5A623),
-                                    padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                                    minimumSize: Size.zero,
-                                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                                  ),
-                                  onPressed: () {
-                                    if (isBookDl) {
-                                      _downloadService.cancelDownload(widget.book.id, -1);
-                                    } else {
-                                      _downloadService.downloadEntireBook(
-                                        book: widget.book,
-                                        voiceKey: _selectedVoiceKey,
-                                      );
-                                    }
-                                  },
-                                  icon: isBookDl
-                                      ? const SizedBox(
-                                          width: 14,
-                                          height: 14,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                            color: Color(0xFFF5A623),
-                                          ),
-                                        )
-                                      : const Icon(Icons.download_for_offline_rounded, size: 15),
-                                  label: Text(
-                                    isBookDl
-                                        ? 'Descargando (${bookDl.completed}/${bookDl.total})'
-                                        : 'Descargar todo',
-                                    style: const TextStyle(fontSize: 11.5, fontWeight: FontWeight.w800),
-                                  ),
-                                );
-                              },
-                            ),
-                            const SizedBox(width: 8),
-                            Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                              decoration: BoxDecoration(
-                                color: const Color(0xFFF5A623).withValues(alpha: 0.15),
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: Text(
-                                '$bookPercent%',
-                                style: const TextStyle(
-                                  color: Color(0xFFF5A623),
-                                  fontSize: 11.5,
-                                  fontWeight: FontWeight.w700,
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 6),
-                    Text(
-                      'Duración total del libro: ${widget.book.totalTime}',
-                      style: const TextStyle(color: Colors.white54, fontSize: 12.5),
-                    ),
-                    const SizedBox(height: 14),
-                    ...List.generate(widget.book.chapters.length, (idx) {
-                      final ch = widget.book.chapters[idx];
-                      final isCurrent = _currentChapter.id == ch.id;
-                      final isCompleted = currentChIdx != -1 && idx < currentChIdx;
-                      final double chProgress = isCurrent
-                          ? (_segments.isEmpty
-                              ? 0.0
-                              : ((_currentSegmentIndex + 1) / _segments.length).clamp(0.0, 1.0))
-                          : (isCompleted ? 1.0 : 0.0);
-                      final bool hasNote = ch.hasNote;
-
-                      return Container(
-                        margin: const EdgeInsets.only(bottom: 10),
-                        decoration: BoxDecoration(
-                          color: isCurrent
-                              ? const Color(0xFFF5A623).withValues(alpha: 0.12)
-                              : Colors.white.withValues(alpha: 0.03),
-                          borderRadius: BorderRadius.circular(14),
-                          border: Border.all(
-                            color: isCurrent
-                                ? const Color(0xFFF5A623).withValues(alpha: 0.5)
-                                : (hasNote
-                                    ? const Color(0xFFF5A623).withValues(alpha: 0.28)
-                                    : Colors.white10),
-                          ),
-                        ),
-                        child: ListTile(
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                          leading: CircleAvatar(
-                            radius: 17,
-                            backgroundColor: isCurrent
-                                ? const Color(0xFFF5A623)
-                                : (isCompleted
-                                    ? Colors.green.withValues(alpha: 0.22)
-                                    : const Color(0xFF2A2A2A)),
-                            child: isCompleted
-                                ? const Icon(Icons.check_rounded, size: 17, color: Colors.greenAccent)
-                                : Text(
-                                    ch.id.toString().padLeft(2, '0'),
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      fontWeight: FontWeight.bold,
-                                      color: isCurrent ? Colors.black : Colors.white70,
-                                    ),
-                                  ),
-                          ),
-                          title: Text(
-                            ch.title,
-                            style: TextStyle(
-                              color: isCurrent
-                                  ? const Color(0xFFF5A623)
-                                  : (isCompleted ? Colors.white70 : Colors.white),
-                              fontWeight: isCurrent ? FontWeight.bold : FontWeight.w500,
-                              fontSize: 14,
-                            ),
-                          ),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              const SizedBox(height: 3),
-                              Text(
-                                isCurrent
-                                    ? 'En curso • Párrafo ${_currentSegmentIndex + 1} de ${_segments.length} (${(chProgress * 100).round()}%)'
-                                    : (isCompleted
-                                        ? 'Completado • ${ch.subtitle}'
-                                        : ch.subtitle),
-                                style: TextStyle(
-                                  color: isCurrent ? Colors.white70 : Colors.white54,
-                                  fontSize: 11.5,
-                                ),
-                              ),
-                              if (isCurrent) ...[
-                                const SizedBox(height: 6),
-                                ClipRRect(
-                                  borderRadius: BorderRadius.circular(4),
-                                  child: LinearProgressIndicator(
-                                    value: chProgress,
-                                    minHeight: 4,
-                                    backgroundColor: Colors.white12,
-                                    valueColor: const AlwaysStoppedAnimation<Color>(Color(0xFFF5A623)),
-                                  ),
-                                ),
-                              ],
-                              const SizedBox(height: 8),
-                              // ZONA DE NOTA DE LA SECCIÓN (donde marcaste los círculos azules)
-                              InkWell(
-                                borderRadius: BorderRadius.circular(10),
-                                onTap: () {
-                                  _openChapterNoteEditor(
-                                    ch,
-                                    onSheetUpdated: () {
-                                      setModalState(() {});
-                                    },
-                                  );
-                                },
-                                child: Container(
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: 10,
-                                    vertical: hasNote ? 7 : 5,
-                                  ),
-                                  decoration: BoxDecoration(
-                                    color: hasNote
-                                        ? const Color(0xFFF5A623).withValues(alpha: 0.16)
-                                        : Colors.white.withValues(alpha: 0.05),
-                                    borderRadius: BorderRadius.circular(10),
-                                    border: Border.all(
-                                      color: hasNote
-                                          ? const Color(0xFFF5A623).withValues(alpha: 0.55)
-                                          : Colors.white.withValues(alpha: 0.12),
-                                    ),
-                                  ),
-                                  child: hasNote
-                                      ? Row(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
-                                          children: [
-                                            Icon(
-                                              ch.isNotePinned
-                                                  ? Icons.push_pin_rounded
-                                                  : Icons.sticky_note_2_rounded,
-                                              size: 15,
-                                              color: const Color(0xFFF5A623),
-                                            ),
-                                            const SizedBox(width: 7),
-                                            Expanded(
-                                              child: Column(
-                                                crossAxisAlignment: CrossAxisAlignment.start,
-                                                children: [
-                                                  if (ch.noteTitle != null &&
-                                                      ch.noteTitle!.trim().isNotEmpty &&
-                                                      ch.noteTitle!.trim() != ch.title.trim())
-                                                    Text(
-                                                      ch.noteTitle!.trim(),
-                                                      maxLines: 1,
-                                                      overflow: TextOverflow.ellipsis,
-                                                      style: const TextStyle(
-                                                        color: Color(0xFFF5A623),
-                                                        fontSize: 11.5,
-                                                        fontWeight: FontWeight.w800,
-                                                      ),
-                                                    ),
-                                                  Text(
-                                                    _cleanNotePreview(ch.noteContent ?? ''),
-                                                    maxLines: 2,
-                                                    overflow: TextOverflow.ellipsis,
-                                                    style: const TextStyle(
-                                                      color: Colors.white,
-                                                      fontSize: 12,
-                                                      height: 1.3,
-                                                    ),
-                                                  ),
-                                                ],
-                                              ),
-                                            ),
-                                            const SizedBox(width: 6),
-                                            const Icon(
-                                              Icons.edit_outlined,
-                                              size: 14,
-                                              color: Color(0xFFF5A623),
-                                            ),
-                                          ],
-                                        )
-                                      : Row(
-                                          mainAxisSize: MainAxisSize.min,
-                                          children: const [
-                                            Icon(
-                                              Icons.edit_note_rounded,
-                                              size: 16,
-                                              color: Color(0xFFF5A623),
-                                            ),
-                                            SizedBox(width: 5),
-                                            Text(
-                                              '+ Nota de sección',
-                                              style: TextStyle(
-                                                color: Color(0xFFF5A623),
-                                                fontSize: 11.5,
-                                                fontWeight: FontWeight.w700,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          trailing: AnimatedBuilder(
-                            animation: _downloadService,
-                            builder: (ctx, _) {
-                              final p = _downloadService.getProgress(widget.book.id, ch.id);
-                              final isDownloading = p?.status == DownloadStatus.downloading;
-
-                              return Row(
-                                mainAxisSize: MainAxisSize.min,
-                                children: [
-                                  Text(
-                                    ch.durationText,
-                                    style: TextStyle(
-                                      color: isCurrent ? const Color(0xFFF5A623) : Colors.white38,
-                                      fontSize: 12,
-                                      fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  if (isDownloading)
-                                    SizedBox(
-                                      width: 22,
-                                      height: 22,
-                                      child: CircularProgressIndicator(
-                                        value: p?.progressRatio,
-                                        strokeWidth: 2.4,
-                                        color: const Color(0xFFF5A623),
-                                      ),
-                                    )
-                                  else
-                                    FutureBuilder<bool>(
-                                      future: _downloadService.isChapterFullyDownloaded(
-                                        bookId: widget.book.id,
-                                        chapter: ch,
-                                        voiceKey: _selectedVoiceKey,
-                                        language: widget.book.activeAudioLanguage,
-                                      ),
-                                      builder: (ctx, snap) {
-                                        final isOffline = snap.data == true;
-                                        return IconButton(
-                                          visualDensity: VisualDensity.compact,
-                                          icon: Icon(
-                                            isOffline
-                                                ? Icons.check_circle_rounded
-                                                : Icons.download_for_offline_outlined,
-                                            size: 20,
-                                            color: isOffline ? Colors.greenAccent : Colors.white38,
-                                          ),
-                                          tooltip: isOffline
-                                              ? 'Descargado offline (Tocá para borrar)'
-                                              : 'Descargar capítulo',
-                                          onPressed: () async {
-                                            if (isOffline) {
-                                              await _downloadService.deleteChapterDownload(
-                                                bookId: widget.book.id,
-                                                chapter: ch,
-                                                voiceKey: _selectedVoiceKey,
-                                                language: widget.book.activeAudioLanguage,
-                                              );
-                                              if (mounted) {
-                                                ScaffoldMessenger.of(context).showSnackBar(
-                                                  SnackBar(
-                                                    content: Text('Descarga eliminada: ${ch.title}'),
-                                                    backgroundColor: Colors.white12,
-                                                    behavior: SnackBarBehavior.floating,
-                                                    duration: const Duration(seconds: 1),
-                                                  ),
-                                                );
-                                              }
-                                            } else {
-                                              _downloadService.downloadChapter(
-                                                bookId: widget.book.id,
-                                                chapter: ch,
-                                                voiceKey: _selectedVoiceKey,
-                                                language: widget.book.activeAudioLanguage,
-                                              );
-                                            }
-                                          },
-                                        );
-                                      },
-                                    ),
-                                ],
-                              );
-                            },
-                          ),
-                          onTap: () {
-                            Navigator.pop(context);
-                            _startChapterPlayback(ch, startSegment: 0);
-                          },
-                        ),
-                      );
-                    }),
-                  ],
-                );
-              },
-            );
-          },
-        );
-      },
+      builder: (_) => ChaptersListSheet(
+        book: widget.book,
+        currentChapter: _currentChapter,
+        currentSegmentIndex: _currentSegmentIndex,
+        totalSegmentsInCurrentChapter: _segments.length,
+        bookPercent: bookPercent,
+        selectedVoiceKey: _selectedVoiceKey,
+        downloadService: _downloadService,
+        onSelectChapter: (ch) => _startChapterPlayback(ch, startSegment: 0),
+        onOpenChapterNote: (ch, onNoteSaved) =>
+            _openChapterNoteEditor(ch, onSheetUpdated: onNoteSaved),
+      ),
     );
   }
 
@@ -2476,7 +1476,6 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   Widget _buildCoverModeView() {
     final Color primaryCoverColor = _ambientColors.first;
-    final Color secondaryCoverColor = _ambientColors.last;
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -2549,7 +1548,10 @@ class _PlayerScreenState extends State<PlayerScreen>
               Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  _buildSpotifyAudioVisualizer(primaryCoverColor, secondaryCoverColor),
+                  SpotifyAudioVisualizer(
+                    isPlaying: _isPlaying,
+                    position: _position,
+                  ),
                   const SizedBox(height: 12),
                   Text(
                     _currentChapter.title,
@@ -2585,49 +1587,6 @@ class _PlayerScreenState extends State<PlayerScreen>
           ),
         );
       },
-    );
-  }
-
-  Widget _buildSpotifyAudioVisualizer(Color c1, Color c2) {
-    // 21 barras simétricas que laten suavemente al ritmo de la voz cuando está reproduciendo
-    const List<double> baseHeights = [
-      0.22, 0.35, 0.50, 0.30, 0.68, 0.85, 0.52, 0.92, 0.64, 1.0,
-      0.75, 1.0, 0.64, 0.92, 0.52, 0.85, 0.68, 0.30, 0.50, 0.35, 0.22
-    ];
-    final double phase = (_position.inMilliseconds % 1200) / 1200.0;
-
-    return SizedBox(
-      height: 28,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: List.generate(baseHeights.length, (i) {
-          final double wave = _isPlaying
-              ? (0.45 + 0.55 * sin((phase * 2 * pi) + (i * 0.65)).abs())
-              : 0.22;
-          final double h = (26.0 * baseHeights[i] * wave).clamp(4.0, 26.0);
-          final bool isCenter = (i - 10).abs() <= 4;
-
-          return AnimatedContainer(
-            duration: const Duration(milliseconds: 140),
-            margin: const EdgeInsets.symmetric(horizontal: 2.2),
-            width: 3.2,
-            height: h,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(4),
-              gradient: LinearGradient(
-                begin: Alignment.bottomCenter,
-                end: Alignment.topCenter,
-                colors: _isPlaying
-                    ? [
-                        Color.lerp(c1, const Color(0xFFF5A623), 0.55)!,
-                        isCenter ? const Color(0xFFFFCA58) : Colors.white70,
-                      ]
-                    : [Colors.white24, Colors.white24],
-              ),
-            ),
-          );
-        }),
-      ),
     );
   }
 

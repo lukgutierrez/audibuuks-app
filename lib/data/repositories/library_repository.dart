@@ -81,7 +81,7 @@ class LibraryRepository {
                 final bytes = await pdfFile.readAsBytes();
                 final reExtracted = await PdfExtractorService.extractChaptersInBackground(
                   pdfBytes: bytes,
-                  onProgress: (_, __, ___) {},
+                  onProgress: (_, _, _) {},
                 );
                 if (reExtracted.isNotEmpty) {
                   for (final newCh in reExtracted) {

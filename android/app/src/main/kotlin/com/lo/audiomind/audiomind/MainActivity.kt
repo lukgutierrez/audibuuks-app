@@ -24,6 +24,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.ByteArrayOutputStream
 import java.io.File
+import java.util.concurrent.Executors
 import java.util.zip.ZipFile
 
 class MainActivity : AudioServiceActivity() {
@@ -38,6 +39,41 @@ class MainActivity : AudioServiceActivity() {
 
     private var cpuWakeLock: PowerManager.WakeLock? = null
     private var wifiLock: WifiManager.WifiLock? = null
+
+    // Pool dedicado de 1 hilo y caché de PdfRenderer para renderizar 4-6 páginas en cuadrícula o HD con 0 lag y 0 fugas de RAM
+    private val pdfRenderExecutor = Executors.newSingleThreadExecutor()
+    private var cachedPdfPath: String? = null
+    private var cachedPdfPfd: ParcelFileDescriptor? = null
+    private var cachedPdfRenderer: PdfRenderer? = null
+
+    @Synchronized
+    private fun getOrOpenPdfRenderer(path: String): PdfRenderer? {
+        val file = File(path)
+        if (!file.exists()) return null
+        if (cachedPdfPath == path && cachedPdfRenderer != null) {
+            return cachedPdfRenderer
+        }
+        closeCachedPdfRenderer()
+        val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
+        val renderer = PdfRenderer(pfd)
+        cachedPdfPath = path
+        cachedPdfPfd = pfd
+        cachedPdfRenderer = renderer
+        return renderer
+    }
+
+    @Synchronized
+    private fun closeCachedPdfRenderer() {
+        try {
+            cachedPdfRenderer?.close()
+        } catch (_: Exception) {}
+        try {
+            cachedPdfPfd?.close()
+        } catch (_: Exception) {}
+        cachedPdfRenderer = null
+        cachedPdfPfd = null
+        cachedPdfPath = null
+    }
 
     private fun ensureDownloadNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -239,11 +275,13 @@ class MainActivity : AudioServiceActivity() {
                         result.error("NO_PATH", "Path is null", null)
                         return@setMethodCallHandler
                     }
-                    Thread {
+                    pdfRenderExecutor.execute {
                         try {
-                            val file = File(path)
-                            val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-                            val renderer = PdfRenderer(pfd)
+                            val renderer = getOrOpenPdfRenderer(path)
+                            if (renderer == null) {
+                                runOnUiThread { result.error("NOT_FOUND", "PDF file not found", null) }
+                                return@execute
+                            }
                             if (renderer.pageCount > 0) {
                                 val page = renderer.openPage(0)
                                 val width = 650
@@ -252,40 +290,36 @@ class MainActivity : AudioServiceActivity() {
                                 bitmap.eraseColor(Color.WHITE)
                                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                                 page.close()
-                                renderer.close()
-                                pfd.close()
 
                                 val stream = ByteArrayOutputStream()
-                                bitmap.compress(Bitmap.CompressFormat.JPEG, 88, stream)
+                                bitmap.compress(Bitmap.CompressFormat.JPEG, 86, stream)
+                                bitmap.recycle()
                                 val bytes = stream.toByteArray()
                                 runOnUiThread { result.success(bytes) }
                             } else {
-                                renderer.close()
-                                pfd.close()
                                 runOnUiThread { result.error("EMPTY", "PDF has no pages", null) }
                             }
                         } catch (e: Exception) {
+                            closeCachedPdfRenderer()
                             runOnUiThread { result.error("ERR", e.message, null) }
                         }
-                    }.start()
+                    }
                 }
                 "renderPdfPage" -> {
                     val path = call.argument<String>("path")
                     val pageIndex = call.argument<Int>("pageIndex") ?: 0
-                    val renderWidth = call.argument<Int>("width") ?: 1080
+                    val renderWidth = (call.argument<Int>("width") ?: 1080).coerceIn(220, 2200)
                     if (path == null) {
                         result.error("NO_PATH", "Path is null", null)
                         return@setMethodCallHandler
                     }
-                    Thread {
+                    pdfRenderExecutor.execute {
                         try {
-                            val file = File(path)
-                            if (!file.exists()) {
+                            val renderer = getOrOpenPdfRenderer(path)
+                            if (renderer == null) {
                                 runOnUiThread { result.error("NOT_FOUND", "PDF file not found", null) }
-                                return@Thread
+                                return@execute
                             }
-                            val pfd = ParcelFileDescriptor.open(file, ParcelFileDescriptor.MODE_READ_ONLY)
-                            val renderer = PdfRenderer(pfd)
                             val count = renderer.pageCount
                             if (count > 0) {
                                 val safeIndex = pageIndex.coerceIn(0, count - 1)
@@ -295,11 +329,11 @@ class MainActivity : AudioServiceActivity() {
                                 bitmap.eraseColor(Color.WHITE)
                                 page.render(bitmap, null, null, PdfRenderer.Page.RENDER_MODE_FOR_DISPLAY)
                                 page.close()
-                                renderer.close()
-                                pfd.close()
 
+                                val jpegQuality = if (renderWidth <= 450) 76 else 90
                                 val stream = ByteArrayOutputStream()
-                                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
+                                bitmap.compress(Bitmap.CompressFormat.JPEG, jpegQuality, stream)
+                                bitmap.recycle()
                                 val bytes = stream.toByteArray()
                                 runOnUiThread {
                                     result.success(
@@ -311,14 +345,13 @@ class MainActivity : AudioServiceActivity() {
                                     )
                                 }
                             } else {
-                                renderer.close()
-                                pfd.close()
                                 runOnUiThread { result.error("EMPTY", "PDF has no pages", null) }
                             }
                         } catch (e: Exception) {
+                            closeCachedPdfRenderer()
                             runOnUiThread { result.error("ERR", e.message, null) }
                         }
-                    }.start()
+                    }
                 }
                 "extractEpub" -> {
                     val path = call.argument<String>("path")
@@ -494,6 +527,7 @@ class MainActivity : AudioServiceActivity() {
     override fun onDestroy() {
         isAllowedToPlay = false
         releaseBackgroundNetworkLocks()
+        closeCachedPdfRenderer()
         lofiPlayer?.release()
         lofiPlayer = null
         super.onDestroy()

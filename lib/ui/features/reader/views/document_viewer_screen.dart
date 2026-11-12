@@ -88,6 +88,8 @@ class DocumentViewerScreen extends StatefulWidget {
   final String? currentSpokenSnippet;
   final VoidCallback? onBookFileLinked;
   final Function(int chapterIndex, int segmentIndex)? onSeekToPosition;
+  final void Function(int chapterIndex, int segmentIndex, double wordRatio)?
+      onSeekToExactRatio;
 
   const DocumentViewerScreen({
     super.key,
@@ -99,6 +101,7 @@ class DocumentViewerScreen extends StatefulWidget {
     this.currentSpokenSnippet,
     this.onBookFileLinked,
     this.onSeekToPosition,
+    this.onSeekToExactRatio,
   });
 
   @override
@@ -139,10 +142,22 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
   int _activeSearchMatchIndex = 0;
   Timer? _searchDebounceTimer;
 
-  // --- NUEVO: Zoom Inteligente (Doble Toque + Pellizco + Botones 1 mano sin bloquear el swipe) ---
+  // --- NUEVO: Zoom Inteligente + Toque Instantáneo 0ms + Anclaje de Página ---
   final TransformationController _zoomController = TransformationController();
   double _currentZoomScale = 1.0;
-  Offset _lastDoubleTapLocalPos = Offset.zero;
+  Offset? _pointerDownPos;
+  DateTime? _pointerDownTime;
+  int? _activePointerId;
+
+  // Anclaje estricto de página cuando el usuario toca una oración en el PDF para que jamás salte sola a otra página
+  int? _userPinnedPdfPage;
+  int? _userPinnedChapterIndex;
+  int? _userPinnedSegmentIndex;
+
+  // Destello visual instantáneo (0ms) sobre la línea y palabra exacta que el usuario acaba de tocar
+  int? _tappedFlashPage;
+  Rect? _tappedFlashLineNormRect;
+  Rect? _tappedFlashWordNormRect;
 
   PageController? _pdfPageController;
   PdfDocument? _pdfDoc;
@@ -366,19 +381,26 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     setState(() => _currentZoomScale = targetScale);
   }
 
-  void _handleDoubleTapZoom(Size viewportSize) {
-    if (_currentZoomScale > 1.15) {
-      _resetZoom();
-      return;
-    }
-    const double targetScale = 2.25;
-    final tapX = _lastDoubleTapLocalPos.dx.clamp(0.0, viewportSize.width);
-    final tapY = _lastDoubleTapLocalPos.dy.clamp(0.0, viewportSize.height);
-    final Matrix4 m = Matrix4.identity()
-      ..translateByDouble(tapX * (1.0 - targetScale), tapY * (1.0 - targetScale), 0.0, 1.0)
-      ..scaleByDouble(targetScale, targetScale, 1.0, 1.0);
-    _zoomController.value = m;
-    setState(() => _currentZoomScale = targetScale);
+  static const Set<String> _commonStopwords = {
+    'que', 'del', 'los', 'las', 'una', 'uno', 'unos', 'unas', 'con', 'por',
+    'para', 'como', 'pero', 'mas', 'este', 'esta', 'estos', 'estas', 'ese',
+    'esa', 'esos', 'esas', 'aquel', 'aquella', 'todo', 'toda', 'todos',
+    'todas', 'otro', 'otra', 'otros', 'otras', 'mismo', 'misma', 'entre',
+    'sobre', 'hasta', 'desde', 'hacia', 'cuando', 'donde', 'quien', 'cual',
+    'porque', 'aunque', 'sino', 'tambien', 'solo', 'muy', 'sin', 'sus',
+    'les', 'nos', 'era', 'fue', 'son', 'han', 'hay', 'ser', 'estar',
+    'tener', 'hacer', 'puede', 'habia', 'estaba', 'tenia', 'dijo', 'vez',
+    'the', 'and', 'for', 'that', 'with', 'from', 'this', 'have', 'was',
+    'were', 'are', 'not', 'but', 'what', 'all', 'when', 'your', 'can',
+    'said', 'there', 'use', 'each', 'which', 'she', 'how', 'their', 'will',
+    'other', 'about', 'out', 'many', 'then', 'them', 'these', 'some',
+    'her', 'would', 'make', 'like', 'him', 'into', 'time', 'has', 'look',
+    'two', 'more', 'been', 'who', 'its', 'now', 'find', 'long', 'down',
+  };
+
+  static bool _isDistinctiveWord(String cleanToken) {
+    if (cleanToken.length < 3) return false;
+    return !_commonStopwords.contains(cleanToken);
   }
 
   static String _normalizeToken(String input) {
@@ -393,6 +415,42 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
         .replaceAll(RegExp(r'[^a-zñ0-9]'), '');
   }
 
+  /// Verifica si un párrafo `segText` realmente está impreso en la hoja `pageIndex` del PDF
+  bool _doesSegmentAppearOnPdfPage(String segText, int pageIndex) {
+    final overlay = _ensurePageOverlayExtracted(pageIndex);
+    if (overlay == null || overlay.fullCleanPageText.isEmpty) return false;
+
+    final allCleanWords = segText
+        .split(RegExp(r'\s+'))
+        .map(_normalizeToken)
+        .where((w) => w.isNotEmpty)
+        .toList();
+    if (allCleanWords.isEmpty) return false;
+
+    // 1. Verificar coincidencia exacta de bigramas/trigramas del párrafo en el texto limpio de la página
+    for (int i = 0; i <= allCleanWords.length - 3; i++) {
+      final trigram = '${allCleanWords[i]} ${allCleanWords[i + 1]} ${allCleanWords[i + 2]}';
+      if (trigram.length >= 11 && overlay.fullCleanPageText.contains(trigram)) {
+        return true;
+      }
+    }
+    for (int i = 0; i <= allCleanWords.length - 2; i++) {
+      final bigram = '${allCleanWords[i]} ${allCleanWords[i + 1]}';
+      if (bigram.length >= 9 && overlay.fullCleanPageText.contains(bigram)) {
+        return true;
+      }
+    }
+
+    // 2. Verificar palabras distintivas (sin stopwords)
+    final distinctive = allCleanWords.where(_isDistinctiveWord).take(10).toList();
+    if (distinctive.isEmpty) return false;
+    int hits = 0;
+    for (final w in distinctive) {
+      if (overlay.fullCleanPageText.contains(w)) hits++;
+    }
+    return hits >= max(2, (distinctive.length * 0.5).ceil());
+  }
+
   /// Sincroniza en vivo cuando el narrador avanza al siguiente párrafo o capítulo
   void _syncWithLiveBookProgress() {
     if (!mounted) return;
@@ -402,20 +460,68 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     );
     final newSegIdx = widget.book.lastSegmentIndex;
 
+    // Si ya empezó a sonar con fluidez el segmento tocado, limpiamos el flash inicial y dejamos el subrayado normal
+    if (_tappedFlashLineNormRect != null &&
+        !_isSynthesizingText &&
+        _livePosition.inMilliseconds > 380) {
+      setState(() {
+        _tappedFlashLineNormRect = null;
+        _tappedFlashWordNormRect = null;
+      });
+    }
+
     if (newChIdx != _liveAudioChapterIndex || newSegIdx != _liveAudioSegmentIndex) {
       final prevSyncedPage = _audioSyncedPdfPage;
       final bool wasFollowingOnSyncedPage = (_currentPdfPage == prevSyncedPage);
 
       _liveAudioChapterIndex = newChIdx;
       _liveAudioSegmentIndex = newSegIdx;
+      _tappedFlashLineNormRect = null;
+      _tappedFlashWordNormRect = null;
 
       if (_totalPdfPages > 0) {
-        final nextPage = _findBestPdfPageForActiveSegment(_totalPdfPages);
+        int nextPage;
+        // REGLA DE ORO ANTI-SALTO:
+        // Si el usuario ancló manualmente una página al tocar una oración, o si el nuevo párrafo que acaba de empezar
+        // TAMBIÉN está impreso en la página actual (`_currentPdfPage`), NO cambiamos de página jamás.
+        if (_userPinnedPdfPage != null &&
+            newChIdx == _userPinnedChapterIndex &&
+            newSegIdx == _userPinnedSegmentIndex) {
+          nextPage = _userPinnedPdfPage!;
+        } else {
+          final ch = widget.book.chapters[newChIdx];
+          final segs = (ch.originalLanguageSegments != null &&
+                  ch.originalLanguageSegments!.isNotEmpty)
+              ? ch.originalLanguageSegments!
+              : ch.segments;
+          final currentSegStr = (segs.isNotEmpty && newSegIdx < segs.length)
+              ? segs[newSegIdx]
+              : '';
+
+          if (currentSegStr.isNotEmpty &&
+              _doesSegmentAppearOnPdfPage(currentSegStr, _currentPdfPage)) {
+            nextPage = _currentPdfPage;
+            _userPinnedPdfPage = _currentPdfPage;
+            _userPinnedChapterIndex = newChIdx;
+            _userPinnedSegmentIndex = newSegIdx;
+          } else if (currentSegStr.isNotEmpty &&
+              _currentPdfPage + 1 < _totalPdfPages &&
+              _doesSegmentAppearOnPdfPage(currentSegStr, _currentPdfPage + 1)) {
+            nextPage = _currentPdfPage + 1;
+            _userPinnedPdfPage = nextPage;
+            _userPinnedChapterIndex = newChIdx;
+            _userPinnedSegmentIndex = newSegIdx;
+          } else {
+            _userPinnedPdfPage = null;
+            nextPage = _findBestPdfPageForActiveSegment(_totalPdfPages);
+          }
+        }
+
         setState(() {
           _audioSyncedPdfPage = nextPage;
         });
 
-        // Si el usuario tiene activado el seguimiento del audio y el narrador cambia de hoja, pasamos la página sola.
+        // Si el usuario tiene activado el seguimiento del audio y el narrador realmente pasó a la hoja siguiente, pasamos la página sola.
         if (_viewerMode == 0 &&
             _autoFollowAudio &&
             wasFollowingOnSyncedPage &&
@@ -470,6 +576,14 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
   /// Calcula la página del PDF donde aparece el párrafo activo (verifica también el texto real extraído del PDF para precisión 100%)
   int _findBestPdfPageForActiveSegment(int totalPages) {
     if (totalPages <= 0) return 0;
+
+    // Si el usuario tocó directamente una oración en `_userPinnedPdfPage`, respetar esa página al 100%
+    if (_userPinnedPdfPage != null &&
+        _liveAudioChapterIndex == _userPinnedChapterIndex &&
+        _liveAudioSegmentIndex == _userPinnedSegmentIndex) {
+      return _userPinnedPdfPage!.clamp(0, totalPages - 1);
+    }
+
     final chIdx = _liveAudioChapterIndex.clamp(0, widget.book.chapters.length - 1);
     final ch = widget.book.chapters[chIdx];
     final segs = (ch.originalLanguageSegments != null && ch.originalLanguageSegments!.isNotEmpty)
@@ -492,18 +606,25 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       estimatedPage = (bookRatio * totalPages).floor().clamp(0, totalPages - 1);
     }
 
-    // Si tenemos el documento PDF cargado, verificamos en [estimatedPage, estimatedPage-1, estimatedPage+1]
-    // en cuál de esas hojas aparece realmente la frase actual para que el subrayado coincida siempre al 100%
     if (_pdfDoc != null && segs.isNotEmpty) {
-      final snippetWords = segs[segIdx]
+      final segText = segs[segIdx];
+      // Priorizar la página actualmente visible si el segmento está impreso en ella
+      if (_doesSegmentAppearOnPdfPage(segText, _currentPdfPage)) {
+        return _currentPdfPage;
+      }
+
+      final allTokens = segText
           .split(RegExp(r'\s+'))
           .map(_normalizeToken)
-          .where((w) => w.length >= 4)
-          .take(8)
+          .where(_isDistinctiveWord)
+          .take(10)
           .toList();
 
-      if (snippetWords.length >= 2) {
+      if (allTokens.length >= 2) {
         final candidates = <int>{
+          _currentPdfPage,
+          if (_currentPdfPage + 1 < totalPages) _currentPdfPage + 1,
+          if (_currentPdfPage - 1 >= 0) _currentPdfPage - 1,
           estimatedPage,
           if (estimatedPage + 1 < totalPages) estimatedPage + 1,
           if (estimatedPage - 1 >= 0) estimatedPage - 1,
@@ -519,24 +640,25 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
         }
 
         int bestPage = estimatedPage;
-        int bestHits = -1;
+        int bestScore = -1;
         for (final cand in candidates) {
           if (cand < 0 || cand >= totalPages) continue;
           final overlay = _ensurePageOverlayExtracted(cand);
           if (overlay == null || overlay.fullCleanPageText.isEmpty) continue;
-          int hits = 0;
-          for (final w in snippetWords) {
-            if (overlay.fullCleanPageText.contains(w)) hits++;
+          int score = 0;
+          for (final w in allTokens) {
+            if (overlay.fullCleanPageText.contains(w)) score += 10;
           }
-          if (hits > bestHits) {
-            bestHits = hits;
+          for (int i = 0; i <= allTokens.length - 2; i++) {
+            final bg = '${allTokens[i]} ${allTokens[i + 1]}';
+            if (overlay.fullCleanPageText.contains(bg)) score += 25;
+          }
+          if (score > bestScore) {
+            bestScore = score;
             bestPage = cand;
           }
-          if (hits == snippetWords.length) {
-            return cand;
-          }
         }
-        if (bestHits >= 2) {
+        if (bestScore >= 20) {
           return bestPage;
         }
       }
@@ -640,11 +762,23 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
   ({ List<Rect> activeLineRects, Rect? activeWordRect }) _computeActiveHighlightRectsForPage(
     int pageIndex,
   ) {
-    if (pageIndex != _audioSyncedPdfPage) {
+    // Si el usuario acaba de tocar una oración específica en esta página y aún se está preparando el audio,
+    // mostramos de forma instantánea (0ms) el subrayado dorado sobre la línea y palabra exacta que tocó
+    final bool hasImmediateTapFlash = _tappedFlashPage == pageIndex &&
+        _tappedFlashLineNormRect != null &&
+        (_isSynthesizingText || _livePosition.inMilliseconds < 420);
+
+    if (pageIndex != _audioSyncedPdfPage && !hasImmediateTapFlash) {
       return (activeLineRects: const [], activeWordRect: null);
     }
     final overlay = _ensurePageOverlayExtracted(pageIndex);
     if (overlay == null || overlay.lines.isEmpty) {
+      if (hasImmediateTapFlash) {
+        return (
+          activeLineRects: [_tappedFlashLineNormRect!],
+          activeWordRect: _tappedFlashWordNormRect ?? _tappedFlashLineNormRect,
+        );
+      }
       return (activeLineRects: const [], activeWordRect: null);
     }
 
@@ -668,43 +802,60 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       return (activeLineRects: const [], activeWordRect: null);
     }
 
-    final segWordSet = segWords.where((w) => w.length >= 3).toSet();
+    final segDistinctiveSet = segWords.where(_isDistinctiveWord).toSet();
+    final segWordSet = segDistinctiveSet.isNotEmpty
+        ? segDistinctiveSet
+        : segWords.where((w) => w.length >= 3).toSet();
     final String segJoined = segWords.join(' ');
 
     // Buscamos el mejor grupo continuo de líneas que contenga el párrafo actual
     int bestStart = -1;
     int bestEnd = -1;
-    int maxContigHits = 0;
+    int maxContigScore = 0;
 
     for (int i = 0; i < overlay.lines.length; i++) {
-      int curHits = 0;
+      int curScore = 0;
       final Set<String> matchedWordsInBlock = {};
-      for (int j = i; j < min(overlay.lines.length, i + 9); j++) {
+      for (int j = i; j < min(overlay.lines.length, i + 10); j++) {
         final line = overlay.lines[j];
         for (final w in line.words) {
-          if (w.cleanToken.length >= 3 && segWordSet.contains(w.cleanToken)) {
+          if (segWordSet.contains(w.cleanToken)) {
             matchedWordsInBlock.add(w.cleanToken);
           }
         }
-        curHits = matchedWordsInBlock.length;
-        if (curHits > maxContigHits) {
-          maxContigHits = curHits;
+        curScore = matchedWordsInBlock.length * 3;
+        if (line.cleanText.length >= 8 && segJoined.contains(line.cleanText)) {
+          curScore += 12;
+        }
+        if (curScore > maxContigScore) {
+          maxContigScore = curScore;
           bestStart = i;
           bestEnd = j;
         }
       }
     }
 
-    // Encontrar la línea del PDF que coincide con las primeras 4 palabras del párrafo de audio
-    final firstSegTokens = segWords.take(5).toList();
+    // Encontrar la línea del PDF que coincide con el arranque del párrafo de audio
+    final firstSegTokens = segWords.take(6).toList();
+    final firstDistinctiveTokens = firstSegTokens.where(_isDistinctiveWord).toList();
     int startLineIdx = -1;
     for (int i = 0; i < overlay.lines.length; i++) {
-      final lineTokens = overlay.lines[i].words.map((w) => w.cleanToken).where((t) => t.length >= 3).toList();
+      final line = overlay.lines[i];
+      if (line.cleanText.length >= 10 && segJoined.startsWith(line.cleanText)) {
+        startLineIdx = i;
+        break;
+      }
+      final lineTokens = line.words.map((w) => w.cleanToken).where((t) => t.isNotEmpty).toList();
       int startHits = 0;
-      for (final t in firstSegTokens) {
+      final checkList = firstDistinctiveTokens.length >= 2 ? firstDistinctiveTokens : firstSegTokens;
+      for (final t in checkList) {
         if (lineTokens.contains(t)) startHits++;
       }
-      if (startHits >= 2 || (firstSegTokens.isNotEmpty && lineTokens.isNotEmpty && firstSegTokens.first == lineTokens.first)) {
+      if (startHits >= 2 ||
+          (firstSegTokens.length >= 2 &&
+              lineTokens.length >= 2 &&
+              firstSegTokens[0] == lineTokens[0] &&
+              firstSegTokens[1] == lineTokens[1])) {
         startLineIdx = i;
         break;
       }
@@ -712,19 +863,17 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
 
     final List<int> matchedLineIndices = [];
     if (startLineIdx != -1) {
-      // Tomamos consecutivamente desde la línea exacta de inicio tantas líneas como abarque el párrafo
       int wordsAccumulated = 0;
       for (int k = startLineIdx; k < overlay.lines.length; k++) {
         matchedLineIndices.add(k);
         wordsAccumulated += overlay.lines[k].words.length;
         if (wordsAccumulated >= segWords.length) break;
       }
-    } else if (bestStart != -1 && maxContigHits >= 4) {
+    } else if (bestStart != -1 && maxContigScore >= 9) {
       for (int k = bestStart; k <= bestEnd; k++) {
         matchedLineIndices.add(k);
       }
     } else {
-      // Coincidencia exacta de substring
       for (int i = 0; i < overlay.lines.length; i++) {
         final line = overlay.lines[i];
         if (line.cleanText.isEmpty) continue;
@@ -759,9 +908,18 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       paragraphPdfWords.addAll(l.words.where((w) => w.cleanToken.isNotEmpty));
     }
 
+    // Si el usuario acaba de tocar una oración y su línea aún no estaba en lineRects (o mientras carga), garantizar que se ilumine al instante
+    if (hasImmediateTapFlash && _tappedFlashLineNormRect != null) {
+      if (!lineRects.contains(_tappedFlashLineNormRect!)) {
+        lineRects.add(_tappedFlashLineNormRect!);
+      }
+    }
+
     // Determinar la palabra individual activa dentro del párrafo
     Rect? activeWordRect;
-    if (paragraphPdfWords.isNotEmpty) {
+    if (hasImmediateTapFlash && _isSynthesizingText) {
+      activeWordRect = _tappedFlashWordNormRect ?? _tappedFlashLineNormRect;
+    } else if (paragraphPdfWords.isNotEmpty) {
       final posMs = _livePosition.inMilliseconds;
       final timings = _ttsService.getWordTimings(
         widget.book.id,
@@ -781,14 +939,13 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
         }
         final spokenClean = _normalizeToken(timings[eventIdx].word);
 
-        // Alineación 1: Buscar si la palabra exacta pronunciada por TTS aparece en las palabras de esta hoja
         int bestIdx = -1;
         if (spokenClean.isNotEmpty) {
           final expectedIdx = ((eventIdx / max(1, timings.length - 1)) * (paragraphPdfWords.length - 1))
               .round()
               .clamp(0, paragraphPdfWords.length - 1);
-          final minSearch = max(0, expectedIdx - 5);
-          final maxSearch = min(paragraphPdfWords.length - 1, expectedIdx + 5);
+          final minSearch = max(0, expectedIdx - 6);
+          final maxSearch = min(paragraphPdfWords.length - 1, expectedIdx + 6);
 
           for (int k = minSearch; k <= maxSearch; k++) {
             if (paragraphPdfWords[k].cleanToken == spokenClean) {
@@ -798,7 +955,6 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           }
         }
 
-        // Alineación 2: Si no hubo match exacto de token, alinear proporcionalmente por índice del evento TTS
         if (bestIdx == -1) {
           final ratio = (eventIdx / max(1, timings.length - 1)).clamp(0.0, 1.0);
           bestIdx = (ratio * (paragraphPdfWords.length - 1)).round().clamp(0, paragraphPdfWords.length - 1);
@@ -834,27 +990,15 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           return (chapterIndex: i, chapter: ch, startSeg: 0, endSeg: 0);
         }
 
-        // Si tenemos el texto extraído de esta página del PDF, buscamos exactamente cuál es el primer párrafo de este capítulo que aparece en la hoja
+        // Si tenemos el texto extraído de esta página del PDF, verificamos exactamente qué párrafos están impresos en la hoja
         final overlay = _ensurePageOverlayExtracted(targetPage);
         if (overlay != null && overlay.lines.isNotEmpty) {
           int? firstMatchedSeg;
           int? lastMatchedSeg;
           for (int s = 0; s < segs.length; s++) {
-            final words = segs[s]
-                .split(RegExp(r'\s+'))
-                .map(_normalizeToken)
-                .where((w) => w.length >= 4)
-                .take(6)
-                .toList();
-            if (words.length >= 2) {
-              int hits = 0;
-              for (final w in words) {
-                if (overlay.fullCleanPageText.contains(w)) hits++;
-              }
-              if (hits >= (words.length * 0.6).ceil()) {
-                firstMatchedSeg ??= s;
-                lastMatchedSeg = s;
-              }
+            if (_doesSegmentAppearOnPdfPage(segs[s], targetPage)) {
+              firstMatchedSeg ??= s;
+              lastMatchedSeg = s;
             }
           }
           if (firstMatchedSeg != null) {
@@ -899,9 +1043,9 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
     );
   }
 
-  /// Si el usuario toca directamente una línea o párrafo sobre la hoja del PDF
+  /// Respuesta instantánea (0ms) cuando el usuario toca cualquier oración o palabra sobre la hoja del PDF
   void _onTapPdfPagePosition(
-    TapUpDetails details,
+    Offset localPos,
     Size renderedBoxSize,
     int pageIndex,
   ) {
@@ -936,127 +1080,273 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       offsetY = (renderedBoxSize.height - drawnH) / 2.0;
     }
 
-    final localPos = details.localPosition;
     final normX = (localPos.dx - offsetX) / max(1.0, drawnW);
     final normY = (localPos.dy - offsetY) / max(1.0, drawnH);
 
-    if (normX < 0.0 || normX > 1.0 || normY < 0.0 || normY > 1.0) return;
+    if (normX < -0.02 || normX > 1.02 || normY < -0.02 || normY > 1.02) return;
 
-    // Buscar la línea del PDF más cercana verticalmente al toque del usuario
+    // 1. Buscar la línea del PDF más cercana al toque del usuario con tolerancia vertical amplia y cómoda
     PdfNormalizedLine? tappedLine;
-    double bestDist = 0.045; // tolerancia vertical de ~4.5% de la altura de la hoja
+    double bestLineDist = 0.068; // ~6.8% de la altura de la hoja para que nunca falle aunque toque apenas arriba o abajo del renglón
     for (final line in overlay.lines) {
-      if (normY >= line.normBounds.top - 0.012 &&
-          normY <= line.normBounds.bottom + 0.012) {
+      final bool insideVertically = normY >= line.normBounds.top - 0.015 &&
+          normY <= line.normBounds.bottom + 0.015;
+      final bool insideHorizontally = normX >= line.normBounds.left - 0.08 &&
+          normX <= line.normBounds.right + 0.08;
+      if (insideVertically && insideHorizontally) {
         tappedLine = line;
         break;
       }
-      final centerDist = (normY - line.normBounds.center.dy).abs();
-      if (centerDist < bestDist) {
-        bestDist = centerDist;
+      final vDist = (normY - line.normBounds.center.dy).abs();
+      final hPenalty = insideHorizontally
+          ? 0.0
+          : min((normX - line.normBounds.left).abs(), (normX - line.normBounds.right).abs()) * 0.25;
+      final scoreDist = vDist + hPenalty;
+      if (scoreDist < bestLineDist) {
+        bestLineDist = scoreDist;
         tappedLine = line;
       }
     }
 
     if (tappedLine == null || tappedLine.cleanText.isEmpty) return;
 
-    // Encontrar a qué párrafo del capítulo pertenece la línea tocada
-    final info = _resolveChapterAndSegmentsForPdfPage(pageIndex);
-    final segs = info.chapter.segments;
-    if (segs.isEmpty) return;
-
-    // 1. Recolectar las líneas del bloque alrededor del toque
-    int tappedLineIdx = overlay.lines.indexOf(tappedLine);
-    final blockLines = <PdfNormalizedLine>[];
-    for (int k = max(0, tappedLineIdx - 2); k <= min(overlay.lines.length - 1, tappedLineIdx + 4); k++) {
-      blockLines.add(overlay.lines[k]);
+    // 2. Buscar la palabra específica tocada dentro del renglón para feedback visual y cálculo de wordRatio
+    PdfNormalizedWord? tappedWord;
+    double bestWordDist = 1.0;
+    for (final w in tappedLine.words) {
+      if (w.cleanToken.isEmpty) continue;
+      if (normX >= w.normBounds.left - 0.015 && normX <= w.normBounds.right + 0.015) {
+        tappedWord = w;
+        break;
+      }
+      final dist = (normX - w.normBounds.center.dx).abs();
+      if (dist < bestWordDist) {
+        bestWordDist = dist;
+        tappedWord = w;
+      }
     }
-    final tappedBlockTokens = blockLines
-        .expand((l) => l.words)
+
+    // 3. Resolver el capítulo y los párrafos que realmente aparecen en esta página
+    final info = _resolveChapterAndSegmentsForPdfPage(pageIndex);
+    final tappedLineIdx = overlay.lines.indexOf(tappedLine);
+    final double pageRelativeLineRatio = (tappedLineIdx / max(1, overlay.lines.length - 1)).clamp(0.0, 1.0);
+
+    final tappedLineTokens = tappedLine.words
         .map((w) => w.cleanToken)
-        .where((t) => t.length >= 3)
+        .where((t) => t.isNotEmpty)
         .toList();
+    final tappedDistinctiveTokens = tappedLineTokens.where(_isDistinctiveWord).toList();
+
+    // Construir n-gramas (trigramas y bigramas) de la línea tocada y la línea inmediata siguiente
+    final List<String> tappedTrigrams = [];
+    final List<String> tappedBigrams = [];
+    for (int i = 0; i <= tappedLineTokens.length - 3; i++) {
+      final tri = '${tappedLineTokens[i]} ${tappedLineTokens[i + 1]} ${tappedLineTokens[i + 2]}';
+      if (tri.length >= 10) tappedTrigrams.add(tri);
+    }
+    for (int i = 0; i <= tappedLineTokens.length - 2; i++) {
+      final bi = '${tappedLineTokens[i]} ${tappedLineTokens[i + 1]}';
+      if (bi.length >= 7) tappedBigrams.add(bi);
+    }
+
+    // Líneas vecinas inmediatas (-1 y +1) para desempatar si el renglón es muy corto
+    final neighborDistinctive = <String>[];
+    for (int k = max(0, tappedLineIdx - 1); k <= min(overlay.lines.length - 1, tappedLineIdx + 1); k++) {
+      if (k == tappedLineIdx) continue;
+      neighborDistinctive.addAll(
+        overlay.lines[k].words.map((w) => w.cleanToken).where(_isDistinctiveWord),
+      );
+    }
 
     int bestChIdx = info.chapterIndex;
-    int bestSegIdx = info.startSeg;
-    int bestScore = -1;
+    int bestSegIdx = (info.startSeg + ((info.endSeg - info.startSeg) * pageRelativeLineRatio).round())
+        .clamp(info.startSeg, info.endSeg);
+    double bestScore = -1.0;
 
-    // Buscamos primero en el capítulo de esta página y en los capítulos vecinos
-    final candidateChIndices = <int>{
+    // Candidatos: priorizamos los párrafos del capítulo de esta página, y verificamos cuáles están impresos en `pageIndex`
+    final candidateChIndices = <int>[
       info.chapterIndex,
       if (info.chapterIndex > 0) info.chapterIndex - 1,
       if (info.chapterIndex + 1 < widget.book.chapters.length) info.chapterIndex + 1,
-    };
+    ];
 
     for (final cIdx in candidateChIndices) {
       final ch = widget.book.chapters[cIdx];
-      // Si el PDF original está en inglés y el libro fue traducido, comparar contra los fragmentos originales en inglés
       final segs = (ch.originalLanguageSegments != null && ch.originalLanguageSegments!.isNotEmpty)
           ? ch.originalLanguageSegments!
           : ch.segments;
+      if (segs.isEmpty) continue;
+
       for (int s = 0; s < segs.length; s++) {
         final segWords = segs[s]
             .split(RegExp(r'\s+'))
             .map(_normalizeToken)
-            .where((w) => w.length >= 3)
+            .where((w) => w.isNotEmpty)
             .toList();
         if (segWords.isEmpty) continue;
 
         final segJoined = segWords.join(' ');
+        double score = 0.0;
 
-        // Coincidencia exacta de frase
-        if (segJoined.contains(tappedLine.cleanText) || tappedLine.cleanText.contains(segJoined)) {
-          bestChIdx = cIdx;
-          bestSegIdx = s;
-          bestScore = 9999;
-          break;
+        // A. Coincidencia exacta de la frase del renglón tocado dentro del párrafo
+        if (tappedLine.cleanText.length >= 10 && segJoined.contains(tappedLine.cleanText)) {
+          score += 240.0;
+        } else if (segJoined.length >= 10 && tappedLine.cleanText.contains(segJoined)) {
+          score += 180.0;
         }
 
-        // Búsqueda por solapamiento de tokens ponderado
-        int hits = 0;
+        // B. Coincidencia de trigramas (3 palabras seguidas exactas) y bigramas (2 palabras seguidas)
+        for (final tri in tappedTrigrams) {
+          if (segJoined.contains(tri)) score += 65.0;
+        }
+        for (final bi in tappedBigrams) {
+          if (segJoined.contains(bi)) score += 28.0;
+        }
+
+        // C. Palabras distintivas (sin stopwords como "que", "del", "los", "con")
         final segTokenSet = segWords.toSet();
-        for (final tok in tappedBlockTokens) {
-          if (segTokenSet.contains(tok)) hits += 3;
+        for (final tok in tappedDistinctiveTokens) {
+          if (segTokenSet.contains(tok)) score += 20.0;
         }
-        for (final tok in tappedLine.words.map((w) => w.cleanToken).where((t) => t.length >= 3)) {
-          if (segTokenSet.contains(tok)) hits += 5;
-        }
-
-        // Si el párrafo empieza con palabras clave similares al inicio de la línea tocada
-        if (tappedLine.words.isNotEmpty && segWords.isNotEmpty) {
-          if (tappedLine.words.first.cleanToken == segWords.first) {
-            hits += 15;
+        if (tappedDistinctiveTokens.isEmpty) {
+          for (final tok in tappedLineTokens.where((t) => t.length >= 3)) {
+            if (segTokenSet.contains(tok)) score += 8.0;
           }
         }
-
-        if (cIdx == info.chapterIndex && s >= info.startSeg && s <= info.endSeg) {
-          hits += 2;
+        for (final nTok in neighborDistinctive) {
+          if (segTokenSet.contains(nTok)) score += 5.0;
         }
 
-        if (hits > bestScore) {
-          bestScore = hits;
+        if (score <= 0) continue;
+
+        // D. Bonificación fuerte si el párrafo realmente pertenece a esta hoja del PDF
+        final bool isInExpectedRange = cIdx == info.chapterIndex && s >= info.startSeg && s <= info.endSeg;
+        final bool appearsOnThisPage = isInExpectedRange || _doesSegmentAppearOnPdfPage(segs[s], pageIndex);
+
+        if (appearsOnThisPage) {
+          score += 55.0;
+          if (isInExpectedRange) {
+            final span = max(1, info.endSeg - info.startSeg + 1);
+            final segRelRatio = ((s - info.startSeg) / span).clamp(0.0, 1.0);
+            final posProximity = 1.0 - (segRelRatio - pageRelativeLineRatio).abs();
+            score += posProximity * 24.0;
+          }
+        } else {
+          // Penalizar severamente párrafos de otras páginas para que nunca salte a otra hoja por palabras repetidas
+          score *= 0.18;
+        }
+
+        if (score > bestScore) {
+          bestScore = score;
           bestChIdx = cIdx;
           bestSegIdx = s;
         }
       }
-      if (bestScore >= 9999) break;
     }
 
-    // Actualizar inmediatamente estado local para sincronizar el resaltado y mostrar el spinner de preparación
+    // 4. Calcular en qué punto exacto (wordRatio 0.0 -> 0.90) dentro del párrafo está la oración/palabra que el usuario tocó
+    double wordRatio = 0.0;
+    final matchedCh = widget.book.chapters[bestChIdx];
+    final matchedSegs = (matchedCh.originalLanguageSegments != null && matchedCh.originalLanguageSegments!.isNotEmpty)
+        ? matchedCh.originalLanguageSegments!
+        : matchedCh.segments;
+    if (bestSegIdx >= 0 && bestSegIdx < matchedSegs.length) {
+      final segWords = matchedSegs[bestSegIdx]
+          .split(RegExp(r'\s+'))
+          .map(_normalizeToken)
+          .where((w) => w.isNotEmpty)
+          .toList();
+      if (segWords.length >= 8 && tappedLineTokens.isNotEmpty) {
+        int matchedWordOffset = -1;
+
+        // Intentar ubicar primero por trigrama o bigrama desde la palabra tocada o inicio del renglón
+        final int tappedWordIdxInLine = tappedWord != null
+            ? max(0, tappedLine.words.indexOf(tappedWord))
+            : 0;
+        final searchTokens = tappedLine.words
+            .skip(tappedWordIdxInLine)
+            .map((w) => w.cleanToken)
+            .where((t) => t.isNotEmpty)
+            .toList();
+        final fallbackTokens = searchTokens.length >= 2 ? searchTokens : tappedLineTokens;
+
+        if (fallbackTokens.length >= 2) {
+          final targetFirst = fallbackTokens[0];
+          final targetSecond = fallbackTokens[1];
+          for (int i = 0; i < segWords.length - 1; i++) {
+            if (segWords[i] == targetFirst && segWords[i + 1] == targetSecond) {
+              matchedWordOffset = i;
+              break;
+            }
+          }
+        }
+        if (matchedWordOffset == -1) {
+          final targetDistinctive = fallbackTokens.firstWhere(
+            _isDistinctiveWord,
+            orElse: () => fallbackTokens.first,
+          );
+          for (int i = 0; i < segWords.length; i++) {
+            if (segWords[i] == targetDistinctive) {
+              matchedWordOffset = i;
+              break;
+            }
+          }
+        }
+
+        if (matchedWordOffset > 2) {
+          // Retroceder hasta el inicio de la oración (o 1 palabra antes) para que la voz arranque natural
+          final rawTokens = matchedSegs[bestSegIdx]
+              .split(RegExp(r'\s+'))
+              .where((w) => w.isNotEmpty)
+              .toList();
+          int sentenceStartIdx = matchedWordOffset;
+          for (int k = min(matchedWordOffset - 1, rawTokens.length - 1);
+              k >= max(0, matchedWordOffset - 8);
+              k--) {
+            final tok = rawTokens[k];
+            if (tok.endsWith('.') ||
+                tok.endsWith('!') ||
+                tok.endsWith('?') ||
+                tok.endsWith(':') ||
+                tok.endsWith(';')) {
+              sentenceStartIdx = k + 1;
+              break;
+            }
+          }
+          final finalWordIdx = min(matchedWordOffset, sentenceStartIdx);
+          if (finalWordIdx >= 2) {
+            wordRatio = (finalWordIdx / segWords.length).clamp(0.0, 0.88);
+          }
+        }
+      }
+    }
+
+    // 5. Anclar la página tocada y encender el subrayado instantáneo (0ms) sin cambiar jamás de hoja
     setState(() {
+      _userPinnedPdfPage = pageIndex;
+      _userPinnedChapterIndex = bestChIdx;
+      _userPinnedSegmentIndex = bestSegIdx;
+      _tappedFlashPage = pageIndex;
+      _tappedFlashLineNormRect = tappedLine!.normBounds;
+      _tappedFlashWordNormRect = tappedWord?.normBounds ?? tappedLine.normBounds;
       _activeChapterIndex = bestChIdx;
       _liveAudioChapterIndex = bestChIdx;
       _liveAudioSegmentIndex = bestSegIdx;
       _audioSyncedPdfPage = pageIndex;
+      _currentPdfPage = pageIndex;
       _livePosition = Duration.zero;
       _isSynthesizingText = true;
     });
 
-    // Pausar cualquier audio viejo mientras el nuevo segmento se sintetiza/carga
+    // Pausar cualquier audio viejo mientras el nuevo segmento arranca desde la oración seleccionada
     widget.player.pause();
     NativeChannelService.pauseLoFi();
 
-    widget.onSeekToPosition?.call(bestChIdx, bestSegIdx);
+    if (widget.onSeekToExactRatio != null) {
+      widget.onSeekToExactRatio!(bestChIdx, bestSegIdx, wordRatio);
+    } else {
+      widget.onSeekToPosition?.call(bestChIdx, bestSegIdx);
+    }
   }
 
   Future<void> _tryAutoLocatePdfOnDevice() async {
@@ -2148,6 +2438,9 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                 _resetZoom();
                 setState(() {
                   _currentPdfPage = pageIdx;
+                  if (!_isProgrammaticPageTurn && pageIdx != _userPinnedPdfPage) {
+                    _userPinnedPdfPage = null;
+                  }
                 });
                 if (!_isProgrammaticPageTurn) {
                   _preloadPdfPages([pageIdx - 1, pageIdx + 1, pageIdx + 2]);
@@ -2189,13 +2482,31 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                         drawnH = drawnW / pageAspect;
                       }
 
-                      return GestureDetector(
+                      // Listener directo de 0ms sin retardo de kDoubleTapTimeout (300ms) ni bloqueos de arena de gestos
+                      return Listener(
                         behavior: HitTestBehavior.opaque,
-                        onDoubleTapDown: (details) {
-                          _lastDoubleTapLocalPos = details.localPosition;
+                        onPointerDown: (event) {
+                          _activePointerId = event.pointer;
+                          _pointerDownPos = event.localPosition;
+                          _pointerDownTime = DateTime.now();
                         },
-                        onDoubleTap: () => _handleDoubleTapZoom(boxSize),
-                        onTapUp: (details) => _onTapPdfPagePosition(details, boxSize, pageIdx),
+                        onPointerUp: (event) {
+                          if (_activePointerId != event.pointer ||
+                              _pointerDownPos == null ||
+                              _pointerDownTime == null) {
+                            return;
+                          }
+                          final elapsedMs = DateTime.now().difference(_pointerDownTime!).inMilliseconds;
+                          final moveDist = (event.localPosition - _pointerDownPos!).distance;
+                          _pointerDownPos = null;
+                          _pointerDownTime = null;
+                          _activePointerId = null;
+
+                          // Toque limpio (menos de 18px de desplazamiento y menos de 480ms): respuesta quirúrgica instantánea
+                          if (moveDist <= 18.0 && elapsedMs <= 480) {
+                            _onTapPdfPagePosition(event.localPosition, boxSize, pageIdx);
+                          }
+                        },
                         child: Center(
                           child: SizedBox(
                             width: drawnW,
@@ -2952,41 +3263,140 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
               final isCurrentAudioSegment = isSameChapterAsAudio && activeSeg == sIdx;
               final text = segments[sIdx];
 
-              return GestureDetector(
+              return LayoutBuilder(
                 key: isCurrentAudioSegment ? _activeTextSegmentKey : null,
-                onTap: () {
-                  setState(() {
-                    _liveAudioChapterIndex = _activeChapterIndex;
-                    _liveAudioSegmentIndex = sIdx;
-                    _livePosition = Duration.zero;
-                  });
-                  widget.onSeekToPosition?.call(_activeChapterIndex, sIdx);
-                },
-                child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 220),
-                  margin: const EdgeInsets.only(bottom: 16),
-                  padding: EdgeInsets.all(isCurrentAudioSegment ? 14 : 0),
-                  decoration: BoxDecoration(
+                builder: (ctx, boxConstraints) {
+                  final textPadding = isCurrentAudioSegment ? 14.0 : 0.0;
+                  final maxTextWidth = max(40.0, boxConstraints.maxWidth - (textPadding * 2));
+                  final baseStyle = TextStyle(
+                    fontSize: _fontSize,
+                    height: 1.65,
                     color: isCurrentAudioSegment
-                        ? const Color(0xFFF5A623).withValues(alpha: 0.16)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(12),
-                    border: isCurrentAudioSegment
-                        ? Border.all(color: const Color(0xFFF5A623), width: 1.3)
-                        : null,
-                  ),
-                  child: Text(
-                    text,
-                    style: TextStyle(
-                      fontSize: _fontSize,
-                      height: 1.65,
-                      color: isCurrentAudioSegment
-                          ? Colors.white
-                          : Colors.white.withValues(alpha: 0.85),
-                      fontWeight: isCurrentAudioSegment ? FontWeight.w600 : FontWeight.w400,
+                        ? Colors.white
+                        : Colors.white.withValues(alpha: 0.85),
+                    fontWeight: isCurrentAudioSegment ? FontWeight.w600 : FontWeight.w400,
+                  );
+
+                  // Calcular la palabra activa en vivo para modo EPUB / Texto
+                  Widget textWidget;
+                  final words = text.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+                  if (isCurrentAudioSegment && words.isNotEmpty) {
+                    int activeWordIdx = 0;
+                    final posMs = _livePosition.inMilliseconds;
+                    final timings = _ttsService.getWordTimings(
+                      widget.book.id,
+                      chapter,
+                      sIdx,
+                      _selectedVoiceKey,
+                    );
+                    if (timings != null && timings.isNotEmpty) {
+                      int evIdx = 0;
+                      for (int i = 0; i < timings.length; i++) {
+                        if (posMs >= timings[i].startMs) {
+                          evIdx = i;
+                        } else {
+                          break;
+                        }
+                      }
+                      activeWordIdx = ((evIdx / max(1, timings.length - 1)) * (words.length - 1))
+                          .round()
+                          .clamp(0, words.length - 1);
+                    } else {
+                      final totalMs = max(1200, _liveDuration.inMilliseconds);
+                      final ratio = (posMs / totalMs).clamp(0.0, 0.999);
+                      activeWordIdx = (ratio * words.length).floor().clamp(0, words.length - 1);
+                    }
+
+                    final spans = <InlineSpan>[];
+                    for (int wIdx = 0; wIdx < words.length; wIdx++) {
+                      final bool isSpokenWord = wIdx == activeWordIdx;
+                      spans.add(
+                        TextSpan(
+                          text: '${words[wIdx]}${wIdx < words.length - 1 ? ' ' : ''}',
+                          style: isSpokenWord
+                              ? baseStyle.copyWith(
+                                  backgroundColor: const Color(0xFFF5A623),
+                                  color: Colors.black,
+                                  fontWeight: FontWeight.w800,
+                                )
+                              : null,
+                        ),
+                      );
+                    }
+                    textWidget = RichText(
+                      text: TextSpan(style: baseStyle, children: spans),
+                    );
+                  } else {
+                    textWidget = Text(text, style: baseStyle);
+                  }
+
+                  return GestureDetector(
+                    behavior: HitTestBehavior.opaque,
+                    onTapUp: (details) {
+                      double wordRatio = 0.0;
+                      if (words.length >= 6) {
+                        final localInText = Offset(
+                          (details.localPosition.dx - textPadding).clamp(0.0, maxTextWidth),
+                          max(0.0, details.localPosition.dy - textPadding),
+                        );
+                        final tp = TextPainter(
+                          text: TextSpan(text: text, style: baseStyle),
+                          textDirection: TextDirection.ltr,
+                        )..layout(maxWidth: maxTextWidth);
+                        final charPos = tp.getPositionForOffset(localInText).offset.clamp(0, text.length);
+                        tp.dispose();
+
+                        // Retroceder al inicio de la oración tocada para que el narrador arranque natural desde esa frase
+                        int sentenceCharStart = charPos;
+                        for (int c = charPos - 1; c >= max(0, charPos - 85); c--) {
+                          final chStr = text[c];
+                          if (chStr == '.' || chStr == '!' || chStr == '?' || chStr == ';' || chStr == '\n') {
+                            sentenceCharStart = c + 1;
+                            break;
+                          }
+                        }
+                        final prefixWords = text
+                            .substring(0, sentenceCharStart.clamp(0, text.length))
+                            .trim()
+                            .split(RegExp(r'\s+'))
+                            .where((w) => w.isNotEmpty)
+                            .length;
+                        if (prefixWords >= 2) {
+                          wordRatio = (prefixWords / words.length).clamp(0.0, 0.88);
+                        }
+                      }
+
+                      setState(() {
+                        _liveAudioChapterIndex = _activeChapterIndex;
+                        _liveAudioSegmentIndex = sIdx;
+                        _livePosition = Duration.zero;
+                        _isSynthesizingText = true;
+                      });
+                      widget.player.pause();
+                      NativeChannelService.pauseLoFi();
+                      if (widget.onSeekToExactRatio != null) {
+                        widget.onSeekToExactRatio!(_activeChapterIndex, sIdx, wordRatio);
+                      } else {
+                        widget.onSeekToPosition?.call(_activeChapterIndex, sIdx);
+                      }
+                    },
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 180),
+                      margin: const EdgeInsets.only(bottom: 16),
+                      padding: EdgeInsets.all(textPadding),
+                      decoration: BoxDecoration(
+                        color: isCurrentAudioSegment
+                            ? const Color(0xFFF5A623).withValues(alpha: 0.16)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(12),
+                        border: isCurrentAudioSegment
+                            ? Border.all(color: const Color(0xFFF5A623), width: 1.3)
+                            : null,
+                      ),
+                      child: textWidget,
                     ),
-                  ),
-                ),
+                  );
+                },
               );
             },
           ),

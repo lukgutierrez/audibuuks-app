@@ -439,6 +439,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     ChapterItem chapter, {
     int startSegment = 0,
     int initialSeekMs = 0,
+    double initialWordRatio = 0.0,
   }) async {
     _userRequestedPause = false;
     _isHandlingCompletion = true;
@@ -491,7 +492,7 @@ class _PlayerScreenState extends State<PlayerScreen>
     _ensureCurrentSegmentTokensCached();
 
     widget.onProgressUpdated?.call(playableChapter, safeSeg, segs.length, initialSeekMs);
-    await _playSegmentAtIndex(safeSeg, gen, initialSeekMs);
+    await _playSegmentAtIndex(safeSeg, gen, initialSeekMs, initialWordRatio);
   }
 
   void _scrollToCurrentSegment(int index) {
@@ -513,7 +514,12 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
   }
 
-  Future<void> _playSegmentAtIndex(int index, [int? ignoredGen, int seekToMs = 0]) async {
+  Future<void> _playSegmentAtIndex(
+    int index, [
+    int? ignoredGen,
+    int seekToMs = 0,
+    double initialWordRatio = 0.0,
+  ]) async {
     if (!mounted) return;
     if (index < 0 || index >= _segments.length) return;
 
@@ -613,8 +619,27 @@ class _PlayerScreenState extends State<PlayerScreen>
           ),
         );
 
-        if (seekToMs > 500) {
-          await widget.player.seek(Duration(milliseconds: seekToMs));
+        int effectiveSeekMs = seekToMs;
+        if (effectiveSeekMs <= 500 && initialWordRatio > 0.05) {
+          final timings = _ttsService.getWordTimings(
+            widget.book.id,
+            chapter,
+            index,
+            voiceKey,
+          );
+          if (timings != null && timings.isNotEmpty) {
+            final tIdx = (initialWordRatio * timings.length)
+                .floor()
+                .clamp(0, timings.length - 1);
+            effectiveSeekMs = max(0, timings[tIdx].startMs - 80);
+          } else if (widget.player.duration != null) {
+            effectiveSeekMs =
+                (widget.player.duration!.inMilliseconds * initialWordRatio).round();
+          }
+        }
+
+        if (effectiveSeekMs > 250) {
+          await widget.player.seek(Duration(milliseconds: effectiveSeekMs));
         }
 
         await widget.player.setSpeed(_playbackSpeed);
@@ -1350,6 +1375,23 @@ class _PlayerScreenState extends State<PlayerScreen>
               _playSegmentAtIndex(segIdx, ++_synthesisGeneration);
             } else {
               _startChapterPlayback(targetCh, startSegment: segIdx);
+            }
+          },
+          onSeekToExactRatio: (chIdx, segIdx, wordRatio) {
+            if (chIdx < 0 || chIdx >= widget.book.chapters.length) return;
+            final targetCh = widget.book.chapters[chIdx];
+            widget.book.lastChapterIndex = chIdx;
+            widget.book.lastSegmentIndex = segIdx;
+            widget.book.totalSegmentsInLastChapter = max(1, targetCh.segments.length);
+            _userRequestedPause = false;
+            if (targetCh.id == _currentChapter.id) {
+              _playSegmentAtIndex(segIdx, ++_synthesisGeneration, 0, wordRatio);
+            } else {
+              _startChapterPlayback(
+                targetCh,
+                startSegment: segIdx,
+                initialWordRatio: wordRatio,
+              );
             }
           },
         ),

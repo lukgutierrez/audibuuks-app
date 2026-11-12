@@ -3,6 +3,7 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../../domain/models/book_item.dart';
 import '../../domain/models/chapter_item.dart';
+import 'native_channel_service.dart';
 import 'tts_synthesis_service.dart';
 
 enum DownloadStatus { idle, downloading, paused, completed, error }
@@ -27,6 +28,7 @@ class ChapterDownloadProgress {
 }
 
 /// Administrador centralizado de descargas Offline para capítulos y libros completos
+/// con soporte de ejecución en segundo plano (pantalla bloqueada) y notificación nativa de progreso.
 class OfflineDownloadService extends ChangeNotifier {
   static final OfflineDownloadService _instance = OfflineDownloadService._internal();
   factory OfflineDownloadService() => _instance;
@@ -60,6 +62,10 @@ class OfflineDownloadService extends ChangeNotifier {
     final p = getProgress(bookId, chapterId);
     return p?.status == DownloadStatus.downloading;
   }
+
+  bool get hasAnyActiveDownload =>
+      _activeDownloadingBookId != null ||
+      _chapterProgress.values.any((p) => p.status == DownloadStatus.downloading);
 
   /// Verifica si todos los segmentos de un capítulo están descargados físicamente en el teléfono
   Future<bool> isChapterFullyDownloaded({
@@ -116,12 +122,14 @@ class OfflineDownloadService extends ChangeNotifier {
     return count;
   }
 
-  /// Inicia la descarga completa de un capítulo en segundo plano (lotes de a 3 en paralelo)
+  /// Inicia la descarga completa de un capítulo en segundo plano con WakeLock y Notificación Nativa
   Future<void> downloadChapter({
     required String bookId,
     required ChapterItem chapter,
     required String voiceKey,
     String? language,
+    bool partOfFullBookDownload = false,
+    String? bookTitlePrefix,
   }) async {
     final key = _progressKey(bookId, chapter.id);
     _cancelTokens.remove(key);
@@ -129,6 +137,8 @@ class OfflineDownloadService extends ChangeNotifier {
     final lang = language ?? (voiceKey.startsWith('en-') ? 'en' : 'es');
     final segs = chapter.getSegmentsForLanguage(lang);
     if (segs.isEmpty) return;
+
+    await NativeChannelService.acquireBackgroundLock();
 
     // Calcular cuántos ya están descargados para reanudar desde donde quedó
     int downloaded = 0;
@@ -152,11 +162,29 @@ class OfflineDownloadService extends ChangeNotifier {
     );
     notifyListeners();
 
-    if (downloaded >= segs.length) return;
+    if (downloaded >= segs.length) {
+      if (!partOfFullBookDownload && !hasAnyActiveDownload) {
+        await NativeChannelService.releaseBackgroundLock();
+      }
+      return;
+    }
 
-    const int batchSize = 3;
+    final String notifTitle = bookTitlePrefix != null
+        ? 'Descargando $bookTitlePrefix'
+        : 'Descargando ${chapter.title}';
+
+    await NativeChannelService.updateDownloadNotification(
+      title: notifTitle,
+      subtitle:
+          '${chapter.title} • $downloaded de ${segs.length} párrafos (${((downloaded / segs.length) * 100).round()}%)',
+      progress: downloaded,
+      maxProgress: segs.length,
+      ongoing: true,
+    );
+
+    const int batchSize = 2;
     for (int i = 0; i < segs.length; i += batchSize) {
-      if (_cancelTokens.contains(key)) {
+      if (_cancelTokens.contains(key) || _cancelTokens.contains(bookId)) {
         _chapterProgress[key] = ChapterDownloadProgress(
           chapterId: chapter.id,
           totalSegments: segs.length,
@@ -164,6 +192,9 @@ class OfflineDownloadService extends ChangeNotifier {
           status: DownloadStatus.paused,
         );
         notifyListeners();
+        if (!partOfFullBookDownload && !hasAnyActiveDownload) {
+          await NativeChannelService.cancelDownloadNotification();
+        }
         return;
       }
 
@@ -184,20 +215,38 @@ class OfflineDownloadService extends ChangeNotifier {
       }
 
       if (neededIndices.isNotEmpty) {
-        try {
-          await Future.wait(
-            neededIndices.map(
-              (idx) => _ttsService.synthesizeSegment(
-                bookId: bookId,
-                chapter: chapter,
-                segIdx: idx,
-                text: segs[idx],
-                voiceKey: voiceKey,
+        bool batchSuccess = false;
+        for (int retry = 1; retry <= 6; retry++) {
+          if (_cancelTokens.contains(key) || _cancelTokens.contains(bookId)) break;
+          try {
+            await Future.wait(
+              neededIndices.map(
+                (idx) => _ttsService.synthesizeSegment(
+                  bookId: bookId,
+                  chapter: chapter,
+                  segIdx: idx,
+                  text: segs[idx],
+                  voiceKey: voiceKey,
+                ),
               ),
-            ),
-          );
-          downloaded += neededIndices.length;
-        } catch (e) {
+            );
+            batchSuccess = true;
+            break;
+          } catch (_) {
+            if (retry < 6) {
+              await NativeChannelService.updateDownloadNotification(
+                title: notifTitle,
+                subtitle: 'Señal débil • Reintentando automáticamente ($retry/6)...',
+                progress: downloaded,
+                maxProgress: segs.length,
+                ongoing: true,
+              );
+              await Future<void>.delayed(Duration(milliseconds: 1200 * retry));
+            }
+          }
+        }
+
+        if (!batchSuccess) {
           _chapterProgress[key] = ChapterDownloadProgress(
             chapterId: chapter.id,
             totalSegments: segs.length,
@@ -206,10 +255,22 @@ class OfflineDownloadService extends ChangeNotifier {
             errorMessage: 'Error de conexión',
           );
           notifyListeners();
+          if (!partOfFullBookDownload) {
+            await NativeChannelService.updateDownloadNotification(
+              title: 'Descarga en pausa (${chapter.title})',
+              subtitle: 'Sin conexión estable. Tocá para reanudar cuando vuelva la señal.',
+              progress: downloaded,
+              maxProgress: segs.length,
+              ongoing: false,
+            );
+          }
           return;
         }
+
+        downloaded += neededIndices.length;
       }
 
+      final int pct = ((downloaded / segs.length) * 100).clamp(0, 100).round();
       _chapterProgress[key] = ChapterDownloadProgress(
         chapterId: chapter.id,
         totalSegments: segs.length,
@@ -217,6 +278,14 @@ class OfflineDownloadService extends ChangeNotifier {
         status: DownloadStatus.downloading,
       );
       notifyListeners();
+
+      await NativeChannelService.updateDownloadNotification(
+        title: notifTitle,
+        subtitle: '${chapter.title} • $downloaded/${segs.length} párrafos ($pct%)',
+        progress: downloaded,
+        maxProgress: segs.length,
+        ongoing: true,
+      );
     }
 
     _chapterProgress[key] = ChapterDownloadProgress(
@@ -226,24 +295,47 @@ class OfflineDownloadService extends ChangeNotifier {
       status: DownloadStatus.completed,
     );
     notifyListeners();
+
+    if (!partOfFullBookDownload) {
+      await NativeChannelService.updateDownloadNotification(
+        title: 'Descarga completada ✅',
+        subtitle: '${chapter.title} ya está listo para escuchar sin internet',
+        progress: segs.length,
+        maxProgress: segs.length,
+        ongoing: false,
+      );
+    }
   }
 
   /// Cancela o pausa una descarga activa
   void cancelDownload(String bookId, int chapterId) {
-    final key = _progressKey(bookId, chapterId);
-    _cancelTokens.add(key);
+    if (chapterId == -1) {
+      _cancelTokens.add(bookId);
+      for (final entry in _chapterProgress.keys) {
+        if (entry.startsWith('${bookId}_ch_')) {
+          _cancelTokens.add(entry);
+        }
+      }
+    } else {
+      final key = _progressKey(bookId, chapterId);
+      _cancelTokens.add(key);
+    }
+    NativeChannelService.cancelDownloadNotification();
   }
 
-  /// Descarga el libro completo capítulo a capítulo
+  /// Descarga el libro completo capítulo a capítulo en segundo plano
   Future<void> downloadEntireBook({
     required BookItem book,
     required String voiceKey,
     void Function(int currentChapter, int totalChapters)? onBookProgress,
   }) async {
+    _cancelTokens.remove(book.id);
     _activeDownloadingBookId = book.id;
     _activeBookTotalChapters = book.chapters.length;
     _activeBookCompletedChapters = 0;
     notifyListeners();
+
+    await NativeChannelService.acquireBackgroundLock();
 
     try {
       for (int i = 0; i < book.chapters.length; i++) {
@@ -257,15 +349,30 @@ class OfflineDownloadService extends ChangeNotifier {
           chapter: ch,
           voiceKey: voiceKey,
           language: book.activeAudioLanguage,
+          partOfFullBookDownload: true,
+          bookTitlePrefix: '${book.title} (Cap. ${i + 1}/${book.chapters.length})',
         );
         _activeBookCompletedChapters = i + 1;
         notifyListeners();
+      }
+
+      if (!_cancelTokens.contains(book.id)) {
+        await NativeChannelService.updateDownloadNotification(
+          title: 'Audiolibro descargado al 100% ✅',
+          subtitle: '"${book.title}" está listo para escuchar sin conexión',
+          progress: book.chapters.length,
+          maxProgress: book.chapters.length,
+          ongoing: false,
+        );
       }
     } finally {
       _activeDownloadingBookId = null;
       _activeBookTotalChapters = 0;
       _activeBookCompletedChapters = 0;
       _cancelTokens.remove(book.id);
+      if (!hasAnyActiveDownload) {
+        await NativeChannelService.releaseBackgroundLock();
+      }
       notifyListeners();
     }
   }

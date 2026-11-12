@@ -33,6 +33,7 @@ class AudioPlayerService extends ChangeNotifier {
   ChapterItem? currentChapter;
   List<String> currentSegments = [];
   int currentSegmentIndex = 0;
+  int bufferedUpToSegment = 0;
 
   String selectedVoiceKey = 'es-MX-JorgeNeural';
   String selectedVoiceName = 'Jorge HD (México 🇲🇽 • Cálido)';
@@ -75,19 +76,25 @@ class AudioPlayerService extends ChangeNotifier {
 
   void _initBackgroundListeners() {
     globalAudioPlayer.playerStateStream.listen((state) {
+      final bool activelySpeaking = state.playing &&
+          state.processingState == ProcessingState.ready &&
+          !isSynthesizing &&
+          !userRequestedPause;
       isPlaying = state.playing && !userRequestedPause;
       notifyListeners();
 
-      // Si PlayerScreen está cerrado, el servicio toma el control de avanzar entre párrafos y capítulos
+      // Si PlayerScreen está cerrado o con pantalla apagada, el servicio toma el control total
       if (!isPlayerScreenMounted) {
         if (userRequestedPause) {
           NativeChannelService.pauseLoFi();
           return;
         }
-        if (state.playing && !isSynthesizing && ambientVolume > 0) {
+
+        // Nunca dejar la música ambiental sonando sola si la voz terminó el segmento o está cargando red
+        if (activelySpeaking && ambientVolume > 0) {
           NativeChannelService.setLoFiVolume(ambientVolume);
           NativeChannelService.playLoFi();
-        } else if (!state.playing) {
+        } else {
           NativeChannelService.pauseLoFi();
         }
 
@@ -112,7 +119,6 @@ class AudioPlayerService extends ChangeNotifier {
   }
 
   /// Verifica si el reproductor ya tiene cargado y activo exactamente este libro, capítulo y párrafo.
-  /// Permite que al tocar el MiniPlayerBar se abra PlayerScreen en 0ms sin reiniciar ni cortar la voz.
   bool isSameActiveTarget(BookItem book, ChapterItem chapter, int segmentIndex) {
     return currentBook?.id == book.id &&
         currentChapter?.id == chapter.id &&
@@ -132,11 +138,15 @@ class AudioPlayerService extends ChangeNotifier {
     required double ambientVol,
     required String ambientTrackId,
     required bool pausedByUser,
+    int? bufferedSegment,
   }) {
     currentBook = book;
     currentChapter = chapter;
     currentSegments = segments;
     currentSegmentIndex = segmentIndex;
+    if (bufferedSegment != null) {
+      bufferedUpToSegment = max(segmentIndex, bufferedSegment);
+    }
     selectedVoiceKey = voiceKey;
     selectedVoiceName = voiceName;
     playbackSpeed = speed;
@@ -156,24 +166,32 @@ class AudioPlayerService extends ChangeNotifier {
   void setPlayerScreenMounted(bool mounted) {
     isPlayerScreenMounted = mounted;
     if (mounted) {
-      // Invalidar cualquier operación de fondo para ceder el control limpio a PlayerScreen
       _bgSynthesisGen++;
       _bgPrefetchGen++;
       _isHandlingBgCompletion = false;
     } else if (!userRequestedPause && currentBook != null && currentChapter != null) {
-      // Si se cerró PlayerScreen mientras reproducía, asegurar pre-descarga en segundo plano
-      _startBackgroundPrefetch(
-        currentBook!,
-        currentChapter!,
-        currentSegmentIndex + 1,
-        selectedVoiceKey,
-      );
+      // Adquirir WakeLock de red y CPU para evitar cortes al viajar con la pantalla apagada
+      NativeChannelService.acquireBackgroundLock();
+      // Si el párrafo ya había terminado justo en la transición a pantalla bloqueada, avanzar de inmediato
+      if (globalAudioPlayer.processingState == ProcessingState.completed &&
+          !_isHandlingBgCompletion &&
+          !isSynthesizing) {
+        _onBackgroundSegmentCompleted();
+      } else {
+        _startBackgroundPrefetch(
+          currentBook!,
+          currentChapter!,
+          currentSegmentIndex + 1,
+          selectedVoiceKey,
+        );
+      }
     }
   }
 
   void togglePlayPauseFromMiniPlayer() {
     if (userRequestedPause || !globalAudioPlayer.playing) {
       userRequestedPause = false;
+      NativeChannelService.acquireBackgroundLock();
       globalAudioPlayer.setVolume(1.0);
       unawaited(globalAudioPlayer.play().catchError((_) {}));
       if (ambientVolume > 0) {
@@ -185,6 +203,7 @@ class AudioPlayerService extends ChangeNotifier {
       _bgSynthesisGen++;
       _bgPrefetchGen++;
       NativeChannelService.pauseLoFi();
+      NativeChannelService.releaseBackgroundLock();
       unawaited(globalAudioPlayer.pause().catchError((_) {}));
       if (currentBook != null) {
         currentBook!.lastPositionMs = globalAudioPlayer.position.inMilliseconds;
@@ -215,7 +234,6 @@ class AudioPlayerService extends ChangeNotifier {
         return;
       }
 
-      // Solo descontar segundos cuando no está en pausa manual
       if (userRequestedPause) return;
 
       final nextRem = rem - 1;
@@ -227,7 +245,6 @@ class AudioPlayerService extends ChangeNotifier {
 
       _sleepRemainingSeconds = nextRem;
 
-      // Fade-out suave durante los últimos 10 segundos para no despertar al usuario de golpe
       if (nextRem <= 10) {
         final double fadeFactor = (nextRem / 10.0).clamp(0.08, 1.0);
         globalAudioPlayer.setVolume(fadeFactor);
@@ -278,8 +295,6 @@ class AudioPlayerService extends ChangeNotifier {
     notifyListeners();
   }
 
-  /// Consume la condición de "Dormir al terminar capítulo" si estaba activa.
-  /// Devuelve `true` si debe detenerse la reproducción en este fin de capítulo.
   bool consumeEndOfChapterSleepIfActive() {
     if (!_sleepAtEndOfChapter) return false;
     _triggerSleepStop();
@@ -298,9 +313,9 @@ class AudioPlayerService extends ChangeNotifier {
     _bgPrefetchGen++;
 
     NativeChannelService.pauseLoFi();
+    NativeChannelService.releaseBackgroundLock();
     unawaited(globalAudioPlayer.pause().catchError((_) {}));
 
-    // Restaurar el volumen nominal a 1.0 luego de pausar para la próxima sesión
     Future<void>.delayed(const Duration(milliseconds: 250), () {
       globalAudioPlayer.setVolume(1.0);
       if (ambientVolume > 0) {
@@ -316,7 +331,7 @@ class AudioPlayerService extends ChangeNotifier {
   }
 
   // ===========================================================================
-  // ORQUESTACIÓN EN SEGUNDO PLANO (CUANDO PLAYERSCREEN ESTÁ MINIMIZADO)
+  // ORQUESTACIÓN EN SEGUNDO PLANO (CUANDO PLAYERSCREEN ESTÁ MINIMIZADO O PANTALLA APAGADA)
   // ===========================================================================
 
   Future<void> _onBackgroundSegmentCompleted() async {
@@ -330,6 +345,9 @@ class AudioPlayerService extends ChangeNotifier {
     }
 
     _isHandlingBgCompletion = true;
+    // Pausar la música ambiental inmediatamente mientras se prepara el siguiente segmento
+    NativeChannelService.pauseLoFi();
+
     final book = currentBook!;
     final chapter = currentChapter!;
 
@@ -341,7 +359,6 @@ class AudioPlayerService extends ChangeNotifier {
         index: currentSegmentIndex + 1,
       );
     } else {
-      // Fin del capítulo actual: verificar si el Sleep Timer estaba en modo "Fin del capítulo"
       if (consumeEndOfChapterSleepIfActive()) {
         _isHandlingBgCompletion = false;
         return;
@@ -366,6 +383,7 @@ class AudioPlayerService extends ChangeNotifier {
         currentChapter = nextChapter;
         currentSegments = nextSegs;
         currentSegmentIndex = 0;
+        bufferedUpToSegment = 0;
         book.lastChapterIndex = idx + 1;
         book.lastSegmentIndex = 0;
         book.lastPositionMs = 0;
@@ -382,6 +400,7 @@ class AudioPlayerService extends ChangeNotifier {
       } else {
         _isHandlingBgCompletion = false;
         NativeChannelService.pauseLoFi();
+        NativeChannelService.releaseBackgroundLock();
       }
     }
   }
@@ -400,6 +419,7 @@ class AudioPlayerService extends ChangeNotifier {
     final int gen = ++_bgSynthesisGen;
     ++_bgPrefetchGen;
     currentSegmentIndex = index;
+    bufferedUpToSegment = max(bufferedUpToSegment, index);
     final chIdx = book.chapters.indexWhere((c) => c.id == chapter.id);
     if (chIdx != -1) {
       book.lastChapterIndex = chIdx;
@@ -409,6 +429,9 @@ class AudioPlayerService extends ChangeNotifier {
     book.totalSegmentsInLastChapter = max(1, segments.length);
     unawaited(_repository.saveBookProgressFast(book));
     notifyListeners();
+
+    NativeChannelService.acquireBackgroundLock();
+    NativeChannelService.pauseLoFi();
 
     final segText = segments[index];
     File? audioFile;
@@ -430,7 +453,7 @@ class AudioPlayerService extends ChangeNotifier {
           _isHandlingBgCompletion = false;
           return;
         }
-        await Future<void>.delayed(const Duration(milliseconds: 2000));
+        await Future<void>.delayed(const Duration(milliseconds: 1800));
       }
     }
 
@@ -452,7 +475,7 @@ class AudioPlayerService extends ChangeNotifier {
       }
     } catch (_) {}
 
-    for (int attempt = 0; attempt < 3; attempt++) {
+    for (int attempt = 0; attempt < 4; attempt++) {
       if (isPlayerScreenMounted || gen != _bgSynthesisGen || userRequestedPause) {
         isSynthesizing = false;
         _isHandlingBgCompletion = false;
@@ -478,6 +501,7 @@ class AudioPlayerService extends ChangeNotifier {
 
         isSynthesizing = false;
         _isHandlingBgCompletion = false;
+        bufferedUpToSegment = max(bufferedUpToSegment, index + 1);
         notifyListeners();
 
         if (!userRequestedPause && !isPlayerScreenMounted) {
@@ -490,17 +514,18 @@ class AudioPlayerService extends ChangeNotifier {
         }
         break;
       } catch (_) {
-        if (attempt == 2) {
+        if (attempt == 3) {
           isSynthesizing = false;
           _isHandlingBgCompletion = false;
           notifyListeners();
         } else {
-          await Future<void>.delayed(const Duration(milliseconds: 120));
+          await Future<void>.delayed(const Duration(milliseconds: 150));
         }
       }
     }
   }
 
+  /// Pre-carga toda la sección actual en segundo plano (estilo YouTube) para no depender de señal móvil
   Future<void> _startBackgroundPrefetch(
     BookItem book,
     ChapterItem chapter,
@@ -510,23 +535,62 @@ class AudioPlayerService extends ChangeNotifier {
     final prefetchId = ++_bgPrefetchGen;
     final segs = chapter.getSegmentsForLanguage(book.activeAudioLanguage);
 
-    for (int i = startIdx; i < min(segs.length, startIdx + 8); i++) {
+    for (int i = startIdx; i < segs.length; i++) {
       if (isPlayerScreenMounted ||
           prefetchId != _bgPrefetchGen ||
           currentChapter?.id != chapter.id ||
           userRequestedPause) {
         return;
       }
-      try {
-        await _ttsService.synthesizeSegment(
-          bookId: book.id,
-          chapter: chapter,
-          segIdx: i,
-          text: segs[i],
-          voiceKey: voiceKey,
-        );
-      } catch (_) {
-        await Future<void>.delayed(const Duration(seconds: 2));
+      bool ok = false;
+      for (int retry = 0; retry < 3; retry++) {
+        if (isPlayerScreenMounted ||
+            prefetchId != _bgPrefetchGen ||
+            currentChapter?.id != chapter.id ||
+            userRequestedPause) {
+          return;
+        }
+        try {
+          await _ttsService.synthesizeSegment(
+            bookId: book.id,
+            chapter: chapter,
+            segIdx: i,
+            text: segs[i],
+            voiceKey: voiceKey,
+          );
+          ok = true;
+          break;
+        } catch (_) {
+          await Future<void>.delayed(const Duration(milliseconds: 1500));
+        }
+      }
+      if (ok && currentChapter?.id == chapter.id) {
+        bufferedUpToSegment = max(bufferedUpToSegment, i + 1);
+        notifyListeners();
+      }
+    }
+
+    // Pre-cargar también los primeros 4 párrafos del capítulo siguiente
+    final chIdx = book.chapters.indexWhere((c) => c.id == chapter.id);
+    if (chIdx != -1 && chIdx + 1 < book.chapters.length) {
+      final nextCh = book.chapters[chIdx + 1];
+      final nextSegs = nextCh.getSegmentsForLanguage(book.activeAudioLanguage);
+      for (int k = 0; k < min(4, nextSegs.length); k++) {
+        if (isPlayerScreenMounted ||
+            prefetchId != _bgPrefetchGen ||
+            currentChapter?.id != chapter.id ||
+            userRequestedPause) {
+          return;
+        }
+        try {
+          await _ttsService.synthesizeSegment(
+            bookId: book.id,
+            chapter: nextCh,
+            segIdx: k,
+            text: nextSegs[k],
+            voiceKey: voiceKey,
+          );
+        } catch (_) {}
       }
     }
   }

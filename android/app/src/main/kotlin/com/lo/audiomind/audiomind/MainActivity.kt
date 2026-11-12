@@ -1,11 +1,24 @@
 package com.lo.audiomind.audiomind
 
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.net.wifi.WifiManager
+import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.os.PowerManager
+import androidx.core.app.ActivityCompat
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -15,10 +28,147 @@ import java.util.zip.ZipFile
 
 class MainActivity : AudioServiceActivity() {
     private val CHANNEL = "com.lo.audiomind/pdf_cover"
+    private val DOWNLOAD_CHANNEL_ID = "audibuuks_offline_downloads"
+    private val DOWNLOAD_NOTIFICATION_ID = 4402
+
     private var lofiPlayer: MediaPlayer? = null
     private var lofiVolume: Float = 0.25f
     private var currentTrackPath: String? = null
     private var isAllowedToPlay: Boolean = false
+
+    private var cpuWakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
+
+    private fun ensureDownloadNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            if (nm.getNotificationChannel(DOWNLOAD_CHANNEL_ID) == null) {
+                val channel = NotificationChannel(
+                    DOWNLOAD_CHANNEL_ID,
+                    "Audibuuks Descargas Offline",
+                    NotificationManager.IMPORTANCE_LOW
+                ).apply {
+                    description = "Progreso de descarga de audiolibros en segundo plano"
+                    setShowBadge(false)
+                    lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                }
+                nm.createNotificationChannel(channel)
+            }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            if (ContextCompat.checkSelfPermission(
+                    this,
+                    Manifest.permission.POST_NOTIFICATIONS
+                ) != PackageManager.PERMISSION_GRANTED
+            ) {
+                ActivityCompat.requestPermissions(
+                    this,
+                    arrayOf(Manifest.permission.POST_NOTIFICATIONS),
+                    1001
+                )
+            }
+        }
+    }
+
+    private fun acquireBackgroundNetworkLocks() {
+        try {
+            if (cpuWakeLock == null) {
+                val pm = applicationContext.getSystemService(Context.POWER_SERVICE) as PowerManager
+                cpuWakeLock = pm.newWakeLock(
+                    PowerManager.PARTIAL_WAKE_LOCK,
+                    "Audibuuks::BackgroundDownloadWakeLock"
+                ).apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (cpuWakeLock?.isHeld == false) {
+                // Hasta 45 minutos máximo de protección continua por sesión de descarga/buffer
+                cpuWakeLock?.acquire(45 * 60 * 1000L)
+            }
+
+            if (wifiLock == null) {
+                val wm = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+                val lockType = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                    WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                } else {
+                    @Suppress("DEPRECATION")
+                    WifiManager.WIFI_MODE_FULL_HIGH_PERF
+                }
+                wifiLock = wm.createWifiLock(lockType, "Audibuuks::BackgroundWifiLock").apply {
+                    setReferenceCounted(false)
+                }
+            }
+            if (wifiLock?.isHeld == false) {
+                wifiLock?.acquire()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun releaseBackgroundNetworkLocks() {
+        try {
+            if (cpuWakeLock?.isHeld == true) {
+                cpuWakeLock?.release()
+            }
+        } catch (_: Exception) {}
+        try {
+            if (wifiLock?.isHeld == true) {
+                wifiLock?.release()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun showDownloadProgressNotification(
+        title: String,
+        subtitle: String,
+        progress: Int,
+        maxProgress: Int,
+        ongoing: Boolean
+    ) {
+        try {
+            ensureDownloadNotificationChannel()
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+
+            val launchIntent = Intent(this, MainActivity::class.java).apply {
+                flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
+            }
+            val pendingFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+            } else {
+                PendingIntent.FLAG_UPDATE_CURRENT
+            }
+            val pendingIntent = PendingIntent.getActivity(this, 0, launchIntent, pendingFlags)
+
+            val builder = NotificationCompat.Builder(this, DOWNLOAD_CHANNEL_ID)
+                .setSmallIcon(R.mipmap.ic_launcher)
+                .setContentTitle(title)
+                .setContentText(subtitle)
+                .setOnlyAlertOnce(true)
+                .setOngoing(ongoing)
+                .setAutoCancel(!ongoing)
+                .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+                .setPriority(NotificationCompat.PRIORITY_LOW)
+                .setColor(0xFFF5A623.toInt())
+                .setContentIntent(pendingIntent)
+
+            if (ongoing && maxProgress > 0) {
+                builder.setProgress(maxProgress, progress.coerceIn(0, maxProgress), false)
+            } else {
+                builder.setProgress(0, 0, false)
+            }
+
+            nm.notify(DOWNLOAD_NOTIFICATION_ID, builder.build())
+        } catch (_: Exception) {}
+    }
+
+    private fun cancelDownloadNotification() {
+        try {
+            val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            nm.cancel(DOWNLOAD_NOTIFICATION_ID)
+        } catch (_: Exception) {}
+    }
 
     private fun setupAndPreparePlayer(path: String, autoStart: Boolean) {
         try {
@@ -56,6 +206,33 @@ class MainActivity : AudioServiceActivity() {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
+                "acquireBackgroundLock" -> {
+                    acquireBackgroundNetworkLocks()
+                    result.success(true)
+                }
+                "releaseBackgroundLock" -> {
+                    releaseBackgroundNetworkLocks()
+                    result.success(true)
+                }
+                "updateDownloadNotification" -> {
+                    requestNotificationPermissionIfNeeded()
+                    acquireBackgroundNetworkLocks()
+                    val title = call.argument<String>("title") ?: "Descargando audiolibro..."
+                    val subtitle = call.argument<String>("subtitle") ?: ""
+                    val progress = call.argument<Int>("progress") ?: 0
+                    val maxProgress = call.argument<Int>("maxProgress") ?: 100
+                    val ongoing = call.argument<Boolean>("ongoing") ?: true
+                    showDownloadProgressNotification(title, subtitle, progress, maxProgress, ongoing)
+                    if (!ongoing) {
+                        releaseBackgroundNetworkLocks()
+                    }
+                    result.success(true)
+                }
+                "cancelDownloadNotification" -> {
+                    releaseBackgroundNetworkLocks()
+                    cancelDownloadNotification()
+                    result.success(true)
+                }
                 "renderFirstPage" -> {
                     val path = call.argument<String>("path")
                     if (path == null) {
@@ -181,7 +358,6 @@ class MainActivity : AudioServiceActivity() {
                                 }
                             }
 
-                            // Si no había imagen llamada "cover", buscar la imagen más grande del EPUB
                             if (coverBytes == null) {
                                 val imgEntries = zip.entries()
                                 while (imgEntries.hasMoreElements()) {
@@ -199,7 +375,6 @@ class MainActivity : AudioServiceActivity() {
 
                             zip.close()
 
-                            // Ordenar los capítulos según el <spine> del archivo .opf si existe, o alfabéticamente
                             val orderedHtmlList = mutableListOf<String>()
                             if (opfContent != null) {
                                 val idToHref = mutableMapOf<String, String>()
@@ -281,7 +456,6 @@ class MainActivity : AudioServiceActivity() {
                     try {
                         isAllowedToPlay = false
                         lofiPlayer?.let {
-                            // Silencio instantáneo en 0ms antes de pausar el buffer de hardware
                             it.setVolume(0f, 0f)
                             if (it.isPlaying) {
                                 it.pause()
@@ -319,6 +493,7 @@ class MainActivity : AudioServiceActivity() {
 
     override fun onDestroy() {
         isAllowedToPlay = false
+        releaseBackgroundNetworkLocks()
         lofiPlayer?.release()
         lofiPlayer = null
         super.onDestroy()

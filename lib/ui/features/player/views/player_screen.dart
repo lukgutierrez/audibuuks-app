@@ -82,9 +82,18 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   List<String> _segments = [];
   int _currentSegmentIndex = 0;
+  int _bufferedUpToSegment = 0;
   int _synthesisGeneration = 0;
   int _prefetchGeneration = 0;
   int _lastSavedSecond = -1;
+  int _lastDisplayedSecond = -1;
+  int _lastActiveWordIdx = -1;
+
+  // Caché de tokens del párrafo actual para evitar RegExp/split repetidos cada 120ms y reducir calor de CPU
+  int _cachedTokenSegmentIdx = -1;
+  int _cachedTokenChapterId = -1;
+  List<String> _cachedTokens = const [];
+  List<String> _cachedCleanTokens = const [];
 
   // Un único GlobalKey para el párrafo activo (evita crear 200 GlobalKeys y elimina el congelamiento ANR)
   final GlobalKey _activeSegmentKey = GlobalKey();
@@ -110,11 +119,45 @@ class _PlayerScreenState extends State<PlayerScreen>
     _ambientAnimController = AnimationController(
       vsync: this,
       duration: const Duration(seconds: 9),
-    )..repeat(reverse: true);
+    );
 
     _loadCoverAmbientPalette();
     _setupAudioStreams();
     _initPreferencesAndStartPlayback();
+  }
+
+  /// Solo activa el ticker de animación ambiental cuando el usuario está en Modo Portada (_viewMode == 0)
+  /// y el audio está reproduciéndose con la pantalla encendida. Ahorra >70% de GPU/batería.
+  void _syncAmbientAnimationTicker() {
+    final bool shouldAnimate =
+        mounted && _viewMode == 0 && _isPlaying && !_userRequestedPause;
+    if (shouldAnimate && !_ambientAnimController.isAnimating) {
+      _ambientAnimController.repeat(reverse: true);
+    } else if (!shouldAnimate && _ambientAnimController.isAnimating) {
+      _ambientAnimController.stop();
+    }
+  }
+
+  void _ensureCurrentSegmentTokensCached() {
+    if (_currentSegmentIndex < 0 || _currentSegmentIndex >= _segments.length) {
+      _cachedTokens = const [];
+      _cachedCleanTokens = const [];
+      return;
+    }
+    if (_cachedTokenChapterId == _currentChapter.id &&
+        _cachedTokenSegmentIdx == _currentSegmentIndex &&
+        _cachedTokens.isNotEmpty) {
+      return;
+    }
+    final raw = _segments[_currentSegmentIndex];
+    final toks = raw.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+    final cleanToks = toks
+        .map((w) => w.toLowerCase().replaceAll(RegExp(r'[^a-záéíóúñü0-9]'), ''))
+        .toList();
+    _cachedTokenChapterId = _currentChapter.id;
+    _cachedTokenSegmentIdx = _currentSegmentIndex;
+    _cachedTokens = toks;
+    _cachedCleanTokens = cleanToks;
   }
 
   void _onGlobalAudioServiceChanged() {
@@ -126,7 +169,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         _isSynthesizing = false;
         _statusMessage = 'Temporizador de sueño finalizado 🌙';
       });
+      _syncAmbientAnimationTicker();
     } else {
+      if (audioPlayerService.currentChapter?.id == _currentChapter.id &&
+          audioPlayerService.bufferedUpToSegment > _bufferedUpToSegment) {
+        _bufferedUpToSegment = audioPlayerService.bufferedUpToSegment;
+      }
       setState(() {});
     }
   }
@@ -143,6 +191,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       ambientVol: _ambientVolume,
       ambientTrackId: _selectedAmbientTrackId,
       pausedByUser: _userRequestedPause,
+      bufferedSegment: _bufferedUpToSegment,
     );
   }
 
@@ -187,8 +236,6 @@ class _PlayerScreenState extends State<PlayerScreen>
       NativeChannelService.setLoFiVolume(_ambientVolume);
     }
 
-    // Si este mismo libro, capítulo y párrafo ya están cargados en el motor persistente (por ejemplo, al abrir desde MiniPlayerBar),
-    // engancharse en 0ms sin cortar ni reiniciar la voz en curso.
     if (audioPlayerService.isSameActiveTarget(
       widget.book,
       _currentChapter,
@@ -204,6 +251,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _currentChapter = activeCh;
         _segments = segs;
         _currentSegmentIndex = safeSeg;
+        _bufferedUpToSegment = max(safeSeg + 1, audioPlayerService.bufferedUpToSegment);
         _position = widget.player.position;
         _duration = widget.player.duration ?? Duration.zero;
         _isPlaying = widget.player.playing;
@@ -211,7 +259,9 @@ class _PlayerScreenState extends State<PlayerScreen>
         _isSynthesizing = false;
         _statusMessage = '';
       });
+      _ensureCurrentSegmentTokensCached();
       _syncToGlobalService();
+      _syncAmbientAnimationTicker();
 
       if (!_userRequestedPause && !_isPlaying) {
         unawaited(widget.player.play().catchError((_) {}));
@@ -258,13 +308,45 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.paused ||
-        state == AppLifecycleState.inactive ||
-        state == AppLifecycleState.detached) {
+    if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
+      // Al apagar la pantalla o minimizar con el reproductor abierto:
+      // 1. Apagar el ticker gráfico para no calentar el teléfono.
+      // 2. Ceder el control al servicio nativo de fondo con WakeLock para que en el colectivo no se corte entre párrafos.
+      _ambientAnimController.stop();
       _saveExactPositionNow();
+      _syncToGlobalService();
+      audioPlayerService.setPlayerScreenMounted(false);
       if (!_isPlaying) {
         NativeChannelService.pauseLoFi();
       }
+    } else if (state == AppLifecycleState.resumed) {
+      // Al encender la pantalla nuevamente, recuperar el estado actualizado desde el servicio de fondo
+      audioPlayerService.setPlayerScreenMounted(true);
+      if (audioPlayerService.currentBook?.id == widget.book.id &&
+          audioPlayerService.currentChapter != null) {
+        final activeCh = audioPlayerService.currentChapter!;
+        final segs = activeCh.getSegmentsForLanguage(widget.book.activeAudioLanguage);
+        final safeSeg = audioPlayerService.currentSegmentIndex
+            .clamp(0, max<int>(0, segs.length - 1))
+            .toInt();
+        setState(() {
+          _currentChapter = activeCh;
+          _segments = segs;
+          _currentSegmentIndex = safeSeg;
+          _bufferedUpToSegment = max(
+            _bufferedUpToSegment,
+            max(safeSeg + 1, audioPlayerService.bufferedUpToSegment),
+          );
+          _position = widget.player.position;
+          _duration = widget.player.duration ?? Duration.zero;
+          _isPlaying = widget.player.playing && !audioPlayerService.userRequestedPause;
+          _userRequestedPause = audioPlayerService.userRequestedPause;
+          _isSynthesizing = audioPlayerService.isSynthesizing;
+        });
+        _ensureCurrentSegmentTokensCached();
+        _scrollToCurrentSegment(safeSeg);
+      }
+      _syncAmbientAnimationTicker();
     }
   }
 
@@ -284,14 +366,28 @@ class _PlayerScreenState extends State<PlayerScreen>
         NativeChannelService.pauseLoFi();
         if (_isPlaying) {
           setState(() => _isPlaying = false);
+          _syncAmbientAnimationTicker();
         }
         return;
       }
-      if (_isPlaying != state.playing) {
-        setState(() => _isPlaying = state.playing);
+
+      // Si PlayerScreen cedió el control porque la pantalla está bloqueada, deja que AudioPlayerService maneje todo
+      if (!audioPlayerService.isPlayerScreenMounted) {
+        return;
       }
 
-      if (state.playing && !_isSynthesizing && _ambientVolume > 0) {
+      final bool activelySpeaking = state.playing &&
+          state.processingState == ProcessingState.ready &&
+          !_isSynthesizing &&
+          !_userRequestedPause;
+
+      if (_isPlaying != state.playing) {
+        setState(() => _isPlaying = state.playing);
+        _syncAmbientAnimationTicker();
+      }
+
+      // Sincronización estricta: la música de fondo solo suena cuando la voz está hablando en estado ready
+      if (activelySpeaking && _ambientVolume > 0) {
         NativeChannelService.setLoFiVolume(_ambientVolume);
         NativeChannelService.playLoFi();
       } else {
@@ -304,13 +400,28 @@ class _PlayerScreenState extends State<PlayerScreen>
     });
 
     _positionSub = widget.player.positionStream.listen((pos) {
-      if (!mounted) return;
-      // Solo reconstruir cuando la diferencia supera 120ms para ahorrar CPU en gama baja/media
-      if ((pos.inMilliseconds - _position.inMilliseconds).abs() >= 120 ||
-          pos == Duration.zero) {
-        setState(() => _position = pos);
+      if (!mounted || !audioPlayerService.isPlayerScreenMounted) return;
+      _position = pos;
+
+      _ensureCurrentSegmentTokensCached();
+      final int newWordIdx = _viewMode == 1
+          ? _getActiveWordIndexForCurrentSegment(_cachedTokens)
+          : -1;
+      final int sec = pos.inSeconds;
+
+      // Solo reconstruir la interfaz cuando cambia la palabra hablada, el segundo del reloj,
+      // o en Modo Portada cada 250ms para el visualizador (reduce el calor de CPU/GPU en un 75%)
+      final bool wordChanged = _viewMode == 1 && newWordIdx != _lastActiveWordIdx;
+      final bool secChanged = sec != _lastDisplayedSecond;
+      final bool coverTick =
+          _viewMode == 0 && (pos.inMilliseconds % 260 < 60);
+
+      if (wordChanged || secChanged || coverTick || pos == Duration.zero) {
+        _lastActiveWordIdx = newWordIdx;
+        _lastDisplayedSecond = sec;
+        setState(() {});
       }
-      final sec = pos.inSeconds;
+
       if (sec != _lastSavedSecond && sec % 3 == 0) {
         _lastSavedSecond = sec;
         _saveExactPositionNow();
@@ -372,10 +483,12 @@ class _PlayerScreenState extends State<PlayerScreen>
       _currentChapter = playableChapter;
       _segments = segs;
       _currentSegmentIndex = safeSeg;
+      _bufferedUpToSegment = safeSeg;
       _lastAutoScrolledSegment = -1;
       _isSynthesizing = true;
       _statusMessage = 'Preparando voz HD (${_selectedVoiceName.split(' ').first})...';
     });
+    _ensureCurrentSegmentTokensCached();
 
     widget.onProgressUpdated?.call(playableChapter, safeSeg, segs.length, initialSeekMs);
     await _playSegmentAtIndex(safeSeg, gen, initialSeekMs);
@@ -404,15 +517,15 @@ class _PlayerScreenState extends State<PlayerScreen>
     if (!mounted) return;
     if (index < 0 || index >= _segments.length) return;
 
-    // Cada cambio de párrafo genera un token único que invalida cualquier operación anterior en vuelo
     final int gen = ++_synthesisGeneration;
     ++_prefetchGeneration;
     _isHandlingCompletion = true;
     final voiceKey = _selectedVoiceKey;
     final chapter = _currentChapter;
 
-    // Verificar si el párrafo ya está pre-cargado en caché local (estilo YouTube Music).
-    // Si ya está en caché, NO mostramos el spinner de carga para que la transición sea 100% invisible y continua.
+    // Pausar inmediatamente la música ambiental para que jamás suene sola mientras carga un segmento
+    NativeChannelService.pauseLoFi();
+
     final currentSegText = _segments[index];
     final bool alreadyCached = await _ttsService.isSegmentCached(
       bookId: widget.book.id,
@@ -425,6 +538,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     setState(() {
       _currentSegmentIndex = index;
+      _bufferedUpToSegment = max(_bufferedUpToSegment, index + (alreadyCached ? 1 : 0));
       widget.book.lastChapterIndex = widget.book.chapters
           .indexWhere((c) => c.id == chapter.id)
           .clamp(0, widget.book.chapters.length - 1);
@@ -436,11 +550,12 @@ class _PlayerScreenState extends State<PlayerScreen>
         _statusMessage = '';
       }
     });
+    _ensureCurrentSegmentTokensCached();
     _syncToGlobalService();
     widget.onProgressUpdated?.call(_currentChapter, index, _segments.length, seekToMs);
     _scrollToCurrentSegment(index);
 
-    // 1. Fase de Red / Caché (solo esta fase reintenta si se corta el 4G/LTE)
+    // 1. Fase de Red / Caché con reintento automático si se corta el 4G/LTE en el colectivo
     File? audioFile;
     int networkAttempt = 0;
     while (mounted && gen == _synthesisGeneration && !_userRequestedPause) {
@@ -463,7 +578,7 @@ class _PlayerScreenState extends State<PlayerScreen>
               'Señal inestable • Reconectando automáticamente (intento $networkAttempt)...';
         });
 
-        await Future<void>.delayed(const Duration(milliseconds: 2200));
+        await Future<void>.delayed(const Duration(milliseconds: 1800));
       }
     }
 
@@ -482,7 +597,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       }
     } catch (_) {}
 
-    for (int playerAttempt = 0; playerAttempt < 3; playerAttempt++) {
+    for (int playerAttempt = 0; playerAttempt < 4; playerAttempt++) {
       if (gen != _synthesisGeneration || !mounted || _userRequestedPause) return;
       try {
         await widget.player.setAudioSource(
@@ -512,25 +627,25 @@ class _PlayerScreenState extends State<PlayerScreen>
         setState(() {
           _isSynthesizing = false;
           _statusMessage = '';
+          _bufferedUpToSegment = max(_bufferedUpToSegment, index + 1);
         });
+        _syncToGlobalService();
 
         if (_userRequestedPause) return;
 
-        // IMPORTANTE: No usar `await widget.player.play()` bloqueante porque en just_audio
-        // ese Future no termina hasta que finaliza toda la pista o se interrumpe.
         unawaited(widget.player.play().catchError((_) {}));
 
         if (_ambientVolume > 0 && !_userRequestedPause) {
           NativeChannelService.setLoFiVolume(_ambientVolume);
           NativeChannelService.playLoFi();
         }
+        _syncAmbientAnimationTicker();
 
-        // 3. Una vez que el audio actual ya arrancó a sonar sin bloqueos,
-        // iniciar en segundo plano la pre-descarga de los próximos párrafos.
+        // 3. Pre-descarga continua de TODA la sección actual en segundo plano (estilo YouTube)
         _startSequentialPrefetch(chapter, index + 1, voiceKey, gen);
         break;
       } catch (_) {
-        if (playerAttempt == 2) {
+        if (playerAttempt == 3) {
           if (mounted && gen == _synthesisGeneration) {
             _isHandlingCompletion = false;
             setState(() {
@@ -539,15 +654,15 @@ class _PlayerScreenState extends State<PlayerScreen>
             });
           }
         } else {
-          await Future<void>.delayed(const Duration(milliseconds: 120));
+          await Future<void>.delayed(const Duration(milliseconds: 140));
         }
       }
     }
   }
 
-  /// Pre-descarga secuencial en segundo plano estilo YouTube Music:
-  /// Va guardando en caché los próximos 12 párrafos y, cuando se acerca el final del capítulo,
-  /// ya deja descargados los primeros 4 párrafos del capítulo siguiente para que la transición sea instantánea.
+  /// Pre-descarga continua estilo YouTube:
+  /// Va guardando en caché todos los párrafos restantes de la sección actual y actualiza en vivo
+  /// la barra secundaria de buffer (`_bufferedUpToSegment`) delante del punto de reproducción.
   Future<void> _startSequentialPrefetch(
     ChapterItem chapter,
     int startIdx,
@@ -557,50 +672,95 @@ class _PlayerScreenState extends State<PlayerScreen>
     final prefetchId = ++_prefetchGeneration;
     final segs = chapter.getSegmentsForLanguage(widget.book.activeAudioLanguage);
 
-    for (int i = startIdx; i < min(segs.length, startIdx + 12); i++) {
+    // 1. Escanear rápido cuántos segmentos consecutivos ya estaban en disco
+    int contiguousCached = startIdx;
+    for (int i = startIdx; i < segs.length; i++) {
+      final cached = await _ttsService.isSegmentCached(
+        bookId: widget.book.id,
+        chapter: chapter,
+        segIdx: i,
+        voiceKey: voiceKey,
+        text: segs[i],
+      );
+      if (cached) {
+        contiguousCached = i + 1;
+      } else {
+        break;
+      }
+    }
+    if (mounted &&
+        prefetchId == _prefetchGeneration &&
+        _currentChapter.id == chapter.id &&
+        contiguousCached > _bufferedUpToSegment) {
+      setState(() {
+        _bufferedUpToSegment = contiguousCached;
+      });
+      _syncToGlobalService();
+    }
+
+    // 2. Pre-cargar toda la sección actual de principio a fin con reintento ante microcortes de 4G
+    for (int i = contiguousCached; i < segs.length; i++) {
       if (prefetchId != _prefetchGeneration ||
           _currentChapter.id != chapter.id ||
           !mounted ||
           _userRequestedPause) {
         return;
       }
-      try {
-        await _ttsService.synthesizeSegment(
-          bookId: widget.book.id,
-          chapter: chapter,
-          segIdx: i,
-          text: segs[i],
-          voiceKey: voiceKey,
-        );
-      } catch (_) {
-        // Si la red está débil, pausar el pre-fetch un momento para no competir con el audio principal
-        await Future<void>.delayed(const Duration(seconds: 2));
+      bool ok = false;
+      for (int retry = 0; retry < 3; retry++) {
+        if (prefetchId != _prefetchGeneration ||
+            _currentChapter.id != chapter.id ||
+            !mounted ||
+            _userRequestedPause) {
+          return;
+        }
+        try {
+          await _ttsService.synthesizeSegment(
+            bookId: widget.book.id,
+            chapter: chapter,
+            segIdx: i,
+            text: segs[i],
+            voiceKey: voiceKey,
+          );
+          ok = true;
+          break;
+        } catch (_) {
+          await Future<void>.delayed(const Duration(milliseconds: 1600));
+        }
+      }
+
+      if (ok &&
+          mounted &&
+          prefetchId == _prefetchGeneration &&
+          _currentChapter.id == chapter.id) {
+        setState(() {
+          _bufferedUpToSegment = max(_bufferedUpToSegment, i + 1);
+        });
+        _syncToGlobalService();
       }
     }
 
-    // Cuando faltan 6 párrafos o menos para terminar el capítulo, pre-cachear el inicio del próximo capítulo
-    if (startIdx + 6 >= segs.length) {
-      final chIdx = widget.book.chapters.indexWhere((c) => c.id == chapter.id);
-      if (chIdx != -1 && chIdx + 1 < widget.book.chapters.length) {
-        final nextCh = widget.book.chapters[chIdx + 1];
-        final nextSegs = nextCh.getSegmentsForLanguage(widget.book.activeAudioLanguage);
-        for (int k = 0; k < min(4, nextSegs.length); k++) {
-          if (prefetchId != _prefetchGeneration ||
-              _currentChapter.id != chapter.id ||
-              !mounted ||
-              _userRequestedPause) {
-            return;
-          }
-          try {
-            await _ttsService.synthesizeSegment(
-              bookId: widget.book.id,
-              chapter: nextCh,
-              segIdx: k,
-              text: nextSegs[k],
-              voiceKey: voiceKey,
-            );
-          } catch (_) {}
+    // 3. Una vez que la sección actual está 100% pre-cargada, pre-cachear los primeros 4 párrafos del próximo capítulo
+    final chIdx = widget.book.chapters.indexWhere((c) => c.id == chapter.id);
+    if (chIdx != -1 && chIdx + 1 < widget.book.chapters.length) {
+      final nextCh = widget.book.chapters[chIdx + 1];
+      final nextSegs = nextCh.getSegmentsForLanguage(widget.book.activeAudioLanguage);
+      for (int k = 0; k < min(4, nextSegs.length); k++) {
+        if (prefetchId != _prefetchGeneration ||
+            _currentChapter.id != chapter.id ||
+            !mounted ||
+            _userRequestedPause) {
+          return;
         }
+        try {
+          await _ttsService.synthesizeSegment(
+            bookId: widget.book.id,
+            chapter: nextCh,
+            segIdx: k,
+            text: nextSegs[k],
+            voiceKey: voiceKey,
+          );
+        } catch (_) {}
       }
     }
   }
@@ -608,11 +768,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _onSegmentCompleted() {
     if (_isSynthesizing || _isHandlingCompletion || _userRequestedPause) return;
     _isHandlingCompletion = true;
+    NativeChannelService.pauseLoFi();
 
     if (_currentSegmentIndex + 1 < _segments.length) {
       _playSegmentAtIndex(_currentSegmentIndex + 1, _synthesisGeneration);
     } else {
-      // Si el Temporizador de Sueño está configurado en "Fin del capítulo actual", detener aquí suavemente
       if (audioPlayerService.consumeEndOfChapterSleepIfActive()) {
         _isHandlingCompletion = false;
         setState(() {
@@ -620,6 +780,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _isPlaying = false;
           _statusMessage = 'Temporizador: Fin del capítulo alcanzado 🌙';
         });
+        _syncAmbientAnimationTicker();
         _saveExactPositionNow();
         return;
       }
@@ -647,6 +808,17 @@ class _PlayerScreenState extends State<PlayerScreen>
     return Duration(seconds: elapsed.clamp(0, totalSec));
   }
 
+  Duration get _chapterBufferedPosition {
+    if (_segments.isEmpty) return Duration.zero;
+    final totalSec = _chapterTotalDuration.inSeconds;
+    final int bufferedSegs = max(_currentSegmentIndex + 1, _bufferedUpToSegment)
+        .clamp(0, _segments.length);
+    final int bufSec = ((bufferedSegs / _segments.length) * totalSec).round();
+    return Duration(
+      seconds: max(_chapterElapsedPosition.inSeconds, bufSec).clamp(0, totalSec),
+    );
+  }
+
   Duration get _fullBookTotalDuration {
     return Duration(seconds: max(60, widget.book.estimatedBookTotalSeconds));
   }
@@ -658,6 +830,15 @@ class _PlayerScreenState extends State<PlayerScreen>
       secBefore += ch.estimatedTotalSeconds;
     }
     return Duration(seconds: secBefore + _chapterElapsedPosition.inSeconds);
+  }
+
+  Duration get _fullBookBufferedPosition {
+    int secBefore = 0;
+    for (final ch in widget.book.chapters) {
+      if (ch.id == _currentChapter.id) break;
+      secBefore += ch.estimatedTotalSeconds;
+    }
+    return Duration(seconds: secBefore + _chapterBufferedPosition.inSeconds);
   }
 
   void _seekWithinCurrentChapter(double targetSeconds) {
@@ -723,15 +904,13 @@ class _PlayerScreenState extends State<PlayerScreen>
           .word
           .toLowerCase()
           .replaceAll(RegExp(r'[^a-záéíóúñü0-9]'), '');
-      if (spokenWord.isNotEmpty) {
+      if (spokenWord.isNotEmpty && _cachedCleanTokens.length == tokens.length) {
         final minSearch = max(0, expectedIdx - 4);
         final maxSearch = min(tokens.length - 1, expectedIdx + 4);
         int bestIdx = expectedIdx;
         int bestDist = 999;
         for (int k = minSearch; k <= maxSearch; k++) {
-          final cleanToken = tokens[k]
-              .toLowerCase()
-              .replaceAll(RegExp(r'[^a-záéíóúñü0-9]'), '');
+          final cleanToken = _cachedCleanTokens[k];
           if (cleanToken == spokenWord ||
               (spokenWord.length >= 4 && cleanToken.startsWith(spokenWord))) {
             final dist = (k - expectedIdx).abs();
@@ -964,6 +1143,7 @@ class _PlayerScreenState extends State<PlayerScreen>
         _isPlaying = false;
         _statusMessage = 'Pausado';
       });
+      _syncAmbientAnimationTicker();
       _syncToGlobalService();
       _saveExactPositionNow();
       return;
@@ -976,6 +1156,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       setState(() {
         _isPlaying = false;
       });
+      _syncAmbientAnimationTicker();
       _syncToGlobalService();
       _saveExactPositionNow();
     } else {
@@ -1278,6 +1459,7 @@ class _PlayerScreenState extends State<PlayerScreen>
                       _immersiveTextMode = false;
                       _lastAutoScrolledSegment = -1;
                     });
+                    _syncAmbientAnimationTicker();
                     if (_viewMode == 1) {
                       _scrollToCurrentSegment(_currentSegmentIndex);
                     }
@@ -1441,6 +1623,7 @@ class _PlayerScreenState extends State<PlayerScreen>
           _immersiveTextMode = false;
           _lastAutoScrolledSegment = -1;
         });
+        _syncAmbientAnimationTicker();
         if (index == 1) {
           _scrollToCurrentSegment(_currentSegmentIndex);
         }
@@ -1501,30 +1684,26 @@ class _PlayerScreenState extends State<PlayerScreen>
                     return Stack(
                       alignment: Alignment.center,
                       children: [
-                        // Halo difuso del color dominante de la portada
+                        // Halo difuso ligero con RadialGradient (0% GPU thermal overhead)
                         Transform.scale(
-                          scale: pulse * 1.12,
+                          scale: pulse * 1.28,
                           child: Container(
-                            width: coverWidth,
-                            height: coverHeight * 0.88,
+                            width: coverWidth * 1.32,
+                            height: coverHeight * 1.18,
                             decoration: BoxDecoration(
-                              borderRadius: BorderRadius.circular(32),
-                              boxShadow: [
-                                BoxShadow(
-                                  color: primaryCoverColor.withValues(
-                                    alpha: _isPlaying ? 0.65 : 0.32,
+                              shape: BoxShape.circle,
+                              gradient: RadialGradient(
+                                colors: [
+                                  primaryCoverColor.withValues(
+                                    alpha: _isPlaying ? 0.58 : 0.28,
                                   ),
-                                  blurRadius: 65,
-                                  spreadRadius: 14,
-                                ),
-                                BoxShadow(
-                                  color: const Color(0xFFF5A623).withValues(
-                                    alpha: _isPlaying ? 0.22 : 0.08,
+                                  const Color(0xFFF5A623).withValues(
+                                    alpha: _isPlaying ? 0.18 : 0.06,
                                   ),
-                                  blurRadius: 45,
-                                  spreadRadius: 4,
-                                ),
-                              ],
+                                  Colors.transparent,
+                                ],
+                                stops: const [0.0, 0.55, 1.0],
+                              ),
                             ),
                           ),
                         ),
@@ -1660,67 +1839,71 @@ class _PlayerScreenState extends State<PlayerScreen>
               final String segText = _segments[idx];
 
               if (!isCurrentSeg) {
-                return GestureDetector(
-                  onTap: () {
-                    if (_immersiveTextMode) {
-                      setState(() => _immersiveTextMode = false);
-                      return;
-                    }
-                    _playSegmentAtIndex(idx, _synthesisGeneration);
-                  },
-                  child: Padding(
-                    padding: const EdgeInsets.only(bottom: 18),
-                    child: Text(
-                      segText,
-                      style: TextStyle(
-                        fontFamily: GoogleFonts.inter().fontFamily,
-                        fontSize: 19,
-                        height: 1.65,
-                        color: idx < _currentSegmentIndex
-                            ? Colors.white.withValues(alpha: 0.42)
-                            : Colors.white.withValues(alpha: 0.68),
-                        fontWeight: FontWeight.w400,
+                return RepaintBoundary(
+                  child: GestureDetector(
+                    onTap: () {
+                      if (_immersiveTextMode) {
+                        setState(() => _immersiveTextMode = false);
+                        return;
+                      }
+                      _playSegmentAtIndex(idx, _synthesisGeneration);
+                    },
+                    child: Padding(
+                      padding: const EdgeInsets.only(bottom: 18),
+                      child: Text(
+                        segText,
+                        style: TextStyle(
+                          fontFamily: GoogleFonts.inter().fontFamily,
+                          fontSize: 19,
+                          height: 1.65,
+                          color: idx < _currentSegmentIndex
+                              ? Colors.white.withValues(alpha: 0.42)
+                              : Colors.white.withValues(alpha: 0.68),
+                          fontWeight: FontWeight.w400,
+                        ),
                       ),
                     ),
                   ),
                 );
               }
 
-              final List<String> tokens =
-                  segText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toList();
+              _ensureCurrentSegmentTokensCached();
+              final List<String> tokens = _cachedTokens;
               final int activeWordIdx = _getActiveWordIndexForCurrentSegment(tokens);
 
-              return GestureDetector(
-                key: _activeSegmentKey,
-                onTap: () {
-                  setState(() {
-                    _immersiveTextMode = !_immersiveTextMode;
-                  });
-                },
-                child: Padding(
-                  padding: const EdgeInsets.only(bottom: 18),
-                  child: RichText(
-                    text: TextSpan(
-                      style: TextStyle(
-                        fontFamily: GoogleFonts.inter().fontFamily,
-                        fontSize: 19,
-                        height: 1.65,
+              return RepaintBoundary(
+                child: GestureDetector(
+                  key: _activeSegmentKey,
+                  onTap: () {
+                    setState(() {
+                      _immersiveTextMode = !_immersiveTextMode;
+                    });
+                  },
+                  child: Padding(
+                    padding: const EdgeInsets.only(bottom: 18),
+                    child: RichText(
+                      text: TextSpan(
+                        style: TextStyle(
+                          fontFamily: GoogleFonts.inter().fontFamily,
+                          fontSize: 19,
+                          height: 1.65,
+                        ),
+                        children: List.generate(tokens.length, (wIdx) {
+                          final bool isCurrentWord = wIdx == activeWordIdx;
+                          return TextSpan(
+                            text: '${tokens[wIdx]}${wIdx < tokens.length - 1 ? ' ' : ''}',
+                            style: TextStyle(
+                              color: isCurrentWord
+                                  ? const Color(0xFFFFCA58)
+                                  : Colors.white.withValues(alpha: 0.96),
+                              fontWeight: isCurrentWord ? FontWeight.w800 : FontWeight.w400,
+                              backgroundColor: isCurrentWord
+                                  ? const Color(0xFFF5A623).withValues(alpha: 0.34)
+                                  : const Color(0xFFF5A623).withValues(alpha: 0.16),
+                            ),
+                          );
+                        }),
                       ),
-                      children: List.generate(tokens.length, (wIdx) {
-                        final bool isCurrentWord = wIdx == activeWordIdx;
-                        return TextSpan(
-                          text: '${tokens[wIdx]}${wIdx < tokens.length - 1 ? ' ' : ''}',
-                          style: TextStyle(
-                            color: isCurrentWord
-                                ? const Color(0xFFFFCA58)
-                                : Colors.white.withValues(alpha: 0.96),
-                            fontWeight: isCurrentWord ? FontWeight.w800 : FontWeight.w400,
-                            backgroundColor: isCurrentWord
-                                ? const Color(0xFFF5A623).withValues(alpha: 0.34)
-                                : const Color(0xFFF5A623).withValues(alpha: 0.16),
-                          ),
-                        );
-                      }),
                     ),
                   ),
                 ),
@@ -1737,18 +1920,29 @@ class _PlayerScreenState extends State<PlayerScreen>
         _sliderShowsFullBook ? _fullBookElapsedPosition : _chapterElapsedPosition;
     final Duration activeTotal =
         _sliderShowsFullBook ? _fullBookTotalDuration : _chapterTotalDuration;
+    final Duration bufferedPos =
+        _sliderShowsFullBook ? _fullBookBufferedPosition : _chapterBufferedPosition;
 
     final double maxSliderSec = max(1.0, activeTotal.inSeconds.toDouble());
     final double currentSliderSec = _draggingSliderSec != null
         ? _draggingSliderSec!.clamp(0.0, maxSliderSec)
         : baseElapsed.inSeconds.toDouble().clamp(0.0, maxSliderSec);
+    final double bufferedSliderSec = max(
+      currentSliderSec,
+      bufferedPos.inSeconds.toDouble().clamp(0.0, maxSliderSec),
+    );
     final Duration activeElapsed = Duration(seconds: currentSliderSec.round());
 
     final int remainingSec = max(0, activeTotal.inSeconds - activeElapsed.inSeconds);
     final int remMins = remainingSec ~/ 60;
+    final bool isChapterFullyBuffered = _segments.isNotEmpty &&
+        _bufferedUpToSegment >= _segments.length - 1;
+    final int bufferedPercent = _segments.isEmpty
+        ? 100
+        : (((_bufferedUpToSegment + 1) / _segments.length) * 100).clamp(0, 100).round();
     final String remainingShort = remMins >= 60
-        ? '${remMins ~/ 60}h ${remMins % 60}m rest.'
-        : '${remMins}m restantes';
+        ? '${remMins ~/ 60}h ${remMins % 60}m rest.${!isChapterFullyBuffered && _bufferedUpToSegment >= _currentSegmentIndex ? ' • Buffer $bufferedPercent%' : ''}'
+        : '${remMins}m restantes${!isChapterFullyBuffered && _bufferedUpToSegment >= _currentSegmentIndex ? ' • Buffer $bufferedPercent%' : ''}';
 
     String? draggingPreviewText;
     if (_draggingSliderSec != null && !_sliderShowsFullBook && _segments.isNotEmpty) {
@@ -1854,15 +2048,17 @@ class _PlayerScreenState extends State<PlayerScreen>
             const SizedBox(height: 8),
             SliderTheme(
               data: SliderTheme.of(context).copyWith(
-                trackHeight: 3.0,
-                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 5.5),
+                trackHeight: 3.5,
+                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6.0),
                 overlayShape: const RoundSliderOverlayShape(overlayRadius: 12),
                 activeTrackColor: const Color(0xFFF5A623),
-                inactiveTrackColor: Colors.white24,
+                secondaryActiveTrackColor: Colors.white.withValues(alpha: 0.42),
+                inactiveTrackColor: Colors.white12,
                 thumbColor: Colors.white,
               ),
               child: Slider(
                 value: currentSliderSec,
+                secondaryTrackValue: bufferedSliderSec,
                 min: 0.0,
                 max: maxSliderSec,
                 onChangeStart: (val) {
@@ -2116,21 +2312,22 @@ class _PlayerScreenState extends State<PlayerScreen>
                         ),
                       ),
                       Positioned(
-                        top: 60 + (t * 45),
-                        left: 30 + ((1 - t) * 50),
-                        right: 30 + (t * 50),
+                        top: 40 + (t * 45),
+                        left: 10 + ((1 - t) * 40),
+                        right: 10 + (t * 40),
                         child: IgnorePointer(
                           child: Container(
-                            height: 280,
+                            height: 320,
                             decoration: BoxDecoration(
                               shape: BoxShape.circle,
-                              boxShadow: [
-                                BoxShadow(
-                                  color: c1.withValues(alpha: 0.55),
-                                  blurRadius: 110,
-                                  spreadRadius: 35,
-                                ),
-                              ],
+                              gradient: RadialGradient(
+                                colors: [
+                                  c1.withValues(alpha: 0.48),
+                                  c1.withValues(alpha: 0.16),
+                                  Colors.transparent,
+                                ],
+                                stops: const [0.0, 0.55, 1.0],
+                              ),
                             ),
                           ),
                         ),

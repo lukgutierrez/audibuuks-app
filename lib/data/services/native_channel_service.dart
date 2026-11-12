@@ -6,6 +6,42 @@ class NativeChannelService {
   static const MethodChannel channel = MethodChannel('com.lo.audiomind/pdf_cover');
   static String currentTrackId = 'classical_adagio';
 
+  static Future<void> acquireBackgroundLock() async {
+    try {
+      await channel.invokeMethod('acquireBackgroundLock');
+    } catch (_) {}
+  }
+
+  static Future<void> releaseBackgroundLock() async {
+    try {
+      await channel.invokeMethod('releaseBackgroundLock');
+    } catch (_) {}
+  }
+
+  static Future<void> updateDownloadNotification({
+    required String title,
+    required String subtitle,
+    required int progress,
+    required int maxProgress,
+    bool ongoing = true,
+  }) async {
+    try {
+      await channel.invokeMethod('updateDownloadNotification', {
+        'title': title,
+        'subtitle': subtitle,
+        'progress': progress,
+        'maxProgress': maxProgress,
+        'ongoing': ongoing,
+      });
+    } catch (_) {}
+  }
+
+  static Future<void> cancelDownloadNotification() async {
+    try {
+      await channel.invokeMethod('cancelDownloadNotification');
+    } catch (_) {}
+  }
+
   static Future<void> initLoFi({
     String trackId = 'classical_adagio',
     bool autoStart = false,

@@ -20,43 +20,72 @@ class SpotifyAudioVisualizer extends StatelessWidget {
   Widget build(BuildContext context) {
     final double phase = (position.inMilliseconds % 1200) / 1200.0;
 
-    return SizedBox(
-      height: 28,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: List.generate(_baseHeights.length, (i) {
-          final double wave = isPlaying
-              ? (0.45 + 0.55 * sin((phase * 2 * pi) + (i * 0.55)).abs())
-              : 0.22;
-          final double barH = (26.0 * _baseHeights[i] * wave).clamp(4.0, 26.0);
-          final bool isCenter = (i - 10).abs() <= 4;
-
-          return AnimatedContainer(
-            duration: const Duration(milliseconds: 140),
-            margin: const EdgeInsets.symmetric(horizontal: 2.2),
-            width: 3.4,
-            height: barH,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(4),
-              gradient: LinearGradient(
-                begin: Alignment.bottomCenter,
-                end: Alignment.topCenter,
-                colors: isPlaying
-                    ? [
-                        isCenter
-                            ? const Color(0xFFF5A623)
-                            : const Color(0xFFF5A623).withValues(alpha: 0.55),
-                        Colors.white.withValues(alpha: isCenter ? 0.92 : 0.45),
-                      ]
-                    : [
-                        Colors.white24,
-                        Colors.white12,
-                      ],
-              ),
-            ),
-          );
-        }),
+    return RepaintBoundary(
+      child: SizedBox(
+        height: 28,
+        width: 170,
+        child: CustomPaint(
+          painter: _VisualizerBarsPainter(
+            isPlaying: isPlaying,
+            phase: phase,
+          ),
+        ),
       ),
     );
+  }
+}
+
+class _VisualizerBarsPainter extends CustomPainter {
+  final bool isPlaying;
+  final double phase;
+
+  const _VisualizerBarsPainter({
+    required this.isPlaying,
+    required this.phase,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    const int n = 21;
+    const double barW = 3.4;
+    const double gap = 4.4;
+    final double totalW = n * barW + (n - 1) * gap;
+    final double startX = (size.width - totalW) / 2.0;
+
+    final Paint centerPaint = Paint()
+      ..color = isPlaying ? const Color(0xFFF5A623) : Colors.white24
+      ..style = PaintingStyle.fill;
+
+    final Paint outerPaint = Paint()
+      ..color = isPlaying
+          ? const Color(0xFFF5A623).withValues(alpha: 0.60)
+          : Colors.white12
+      ..style = PaintingStyle.fill;
+
+    for (int i = 0; i < n; i++) {
+      final double base = SpotifyAudioVisualizer._baseHeights[i];
+      final double wave = isPlaying
+          ? (0.45 + 0.55 * sin((phase * 2 * pi) + (i * 0.55)).abs())
+          : 0.22;
+      final double barH = (26.0 * base * wave).clamp(4.0, 26.0);
+      final double x = startX + i * (barW + gap);
+      final double y = (size.height - barH) / 2.0;
+      final bool isCenter = (i - 10).abs() <= 4;
+
+      canvas.drawRRect(
+        RRect.fromRectAndRadius(
+          Rect.fromLTWH(x, y, barW, barH),
+          const Radius.circular(2.0),
+        ),
+        isCenter ? centerPaint : outerPaint,
+      );
+    }
+  }
+
+  @override
+  bool shouldRepaint(covariant _VisualizerBarsPainter oldDelegate) {
+    if (!isPlaying && !oldDelegate.isPlaying) return false;
+    return oldDelegate.isPlaying != isPlaying ||
+        (oldDelegate.phase - phase).abs() > 0.04;
   }
 }

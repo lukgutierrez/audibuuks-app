@@ -4,52 +4,45 @@
   const LATEST_RELEASE_API = `https://api.github.com/repos/${REPO_OWNER}/${REPO_NAME}/releases/latest`;
   const FALLBACK_RELEASES_URL = `https://github.com/${REPO_OWNER}/${REPO_NAME}/releases`;
 
-  // 1. Voces neuronales reales de Audibuuks (sincronizadas con TtsSynthesisService.voicesMap)
+  // 1. Voces naturales de Audibuuks explicadas de forma clara para cualquier lector
   const VOICES = [
-    { id: "es-MX-JorgeNeural", name: "Jorge HD", flag: "🇲🇽", region: "México", style: "Cálido y narrativo", lang: "es" },
-    { id: "es-AR-TomasNeural", name: "Tomás HD", flag: "🇦🇷", region: "Argentina", style: "Natural y fluido", lang: "es" },
-    { id: "es-AR-ElenaNeural", name: "Elena HD", flag: "🇦🇷", region: "Argentina", style: "Suave y clara", lang: "es" },
-    { id: "es-ES-TristanMultilingualNeural", name: "Tristán DragonHD", flag: "🎙️", region: "Multilingüe", style: "Expresivo DragonHD", lang: "es" },
-    { id: "es-ES-XimenaMultilingualNeural", name: "Ximena DragonHD", flag: "🎙️", region: "Multilingüe", style: "Femenina DragonHD", lang: "es" },
-    { id: "es-CO-GonzaloNeural", name: "Gonzalo HD", flag: "🇨🇴", region: "Colombia", style: "Tono narrador", lang: "es" },
-    { id: "es-ES-AlvaroNeural", name: "Álvaro HD", flag: "🇪🇸", region: "España", style: "Profundo y pausado", lang: "es" },
-    { id: "es-MX-DaliaNeural", name: "Dalia HD", flag: "🇲🇽", region: "México", style: "Clara y articulada", lang: "es" },
-    { id: "en-US-GuyNeural", name: "Guy HD", flag: "🇺🇸", region: "EE. UU.", style: "Warm & narrative", lang: "en" },
-    { id: "en-US-AriaNeural", name: "Aria HD", flag: "🇺🇸", region: "EE. UU.", style: "Clear & expressive", lang: "en" },
-    { id: "en-US-ChristopherNeural", name: "Christopher HD", flag: "🇺🇸", region: "EE. UU.", style: "Deep narrator", lang: "en" },
-    { id: "en-GB-RyanNeural", name: "Ryan HD", flag: "🇬🇧", region: "Reino Unido", style: "British classic", lang: "en" },
-    { id: "en-GB-SoniaNeural", name: "Sonia HD", flag: "🇬🇧", region: "Reino Unido", style: "Soft & crisp", lang: "en" },
+    { name: "Jorge", flag: "🇲🇽", region: "México", style: "Voz masculina cálida, ideal para novelas y estudio", lang: "es", badge: "Favorita" },
+    { name: "Tomás", flag: "🇦🇷", region: "Argentina", style: "Acento argentino natural y muy fluido", lang: "es", badge: "Natural" },
+    { name: "Elena", flag: "🇦🇷", region: "Argentina", style: "Voz femenina suave, perfecta para relajarse", lang: "es", badge: "Suave" },
+    { name: "Tristán", flag: "🎙️", region: "Español Ultra HD", style: "Narración expresiva con entonación realista", lang: "es", badge: "Ultra HD" },
+    { name: "Ximena", flag: "🎙️", region: "Español Ultra HD", style: "Voz femenina expresiva y super clara", lang: "es", badge: "Ultra HD" },
+    { name: "Gonzalo", flag: "🇨🇴", region: "Colombia", style: "Tono narrador claro y agradable", lang: "es", badge: "Narrador" },
+    { name: "Álvaro", flag: "🇪🇸", region: "España", style: "Voz profunda y pausada para lecturas largas", lang: "es", badge: "Profunda" },
+    { name: "Dalia", flag: "🇲🇽", region: "México", style: "Voz femenina nítida y fácil de seguir", lang: "es", badge: "Clara" },
+    { name: "Guy", flag: "🇺🇸", region: "Estados Unidos", style: "Voz cálida para libros y textos en inglés", lang: "en", badge: "English" },
+    { name: "Aria", flag: "🇺🇸", region: "Estados Unidos", style: "Voz femenina expresiva y natural", lang: "en", badge: "English" },
+    { name: "Christopher", flag: "🇺🇸", region: "Estados Unidos", style: "Narrador profundo estilo documental", lang: "en", badge: "English" },
+    { name: "Ryan", flag: "🇬🇧", region: "Reino Unido", style: "Elegante acento británico clásico", lang: "en", badge: "British" },
+    { name: "Sonia", flag: "🇬🇧", region: "Reino Unido", style: "Voz británica suave y prolija", lang: "en", badge: "British" },
   ];
 
-  // 2. Recorrido real en dispositivo (capturas reales del repo)
+  // 2. Recorrido real por la app (100% enfocado en la experiencia de usuario)
   const WALKTHROUGH_ITEMS = [
     {
       img: "screenshots/player.png",
-      alt: "Reproductor y visor karaoke en vivo de Audibuuks",
+      alt: "Reproductor de Audibuuks leyendo y subrayando palabra por palabra",
       caption:
-        "Reproductor minimalista con seguimiento palabra por palabra en tiempo real, barra de pre-buffer estilo YouTube, velocidad 0.7x–2.0x, notas por sección, música clásica de fondo y cambio instantáneo al PDF original.",
+        "Mientras escuchás, Audibuuks te muestra el texto y resalta cada palabra en vivo. Podés cambiar la velocidad, elegir tu voz favorita, agregar música suave de piano o anotar ideas sin salir del libro.",
       wide: false,
     },
     {
       img: "screenshots/home.png",
-      alt: "Biblioteca principal de Audibuuks",
+      alt: "Biblioteca personal de Audibuuks con portadas y progreso",
       caption:
-        "Biblioteca inteligente con filtros rápidos (Todos, Continuar, Terminados, Favoritos), progreso exacto por libro, mini-reproductor persistente, importación directa desde Google Drive y botón de actualizaciones automáticas in-app.",
+        "Todos tus PDF y EPUB organizados en un solo lugar, con portadas, porcentaje leído, filtros rápidos (Continuar, Terminados, Favoritos), carga directa desde Google Drive y aviso automático de actualizaciones.",
       wide: false,
     },
     {
       img: "screenshots/splash.png",
-      alt: "Pantalla de bienvenida animada de Audibuuks a 60 FPS",
+      alt: "Pantalla de inicio de Audibuuks diseñada por Lukgtz",
       caption:
-        "Identidad visual Dark Slate & Ámbar con pantalla de inicio animada a 60 FPS, ecualizador LED digital en vivo y arranque instantáneo sin bloqueos.",
+        "Una experiencia cuidada desde el primer segundo: modo oscuro elegante para no cansar la vista y controles simples pensados para usar con una sola mano.",
       wide: false,
-    },
-    {
-      img: "screenshots/arquitectura.png",
-      alt: "Infografía de arquitectura Clean de Audibuuks",
-      caption:
-        "Arquitectura modular Clean Architecture: extracción PDF en Background Isolates, pool de descargas offline 5x con WakeLock nativo, MediaSession de Android y FileProvider aislado para actualizaciones OTA.",
-      wide: true,
     },
   ];
 
@@ -66,10 +59,10 @@
       <article class="voice-card">
         <div class="voice-head">
           <span class="voice-name">${v.flag} ${v.name}</span>
-          <span class="voice-lang ${v.lang}">${v.lang === "en" ? "ENGLISH" : "ESPAÑOL"}</span>
+          <span class="voice-lang ${v.lang}">${v.lang === "en" ? "INGLÉS" : "ESPAÑOL"}</span>
         </div>
-        <div class="voice-desc">${v.region} · ${v.style}</div>
-        <div class="voice-id">${v.id}</div>
+        <div class="voice-desc">${v.style}</div>
+        <div class="voice-id">${v.region} · ${v.badge}</div>
       </article>`
       )
       .join("");
@@ -181,41 +174,36 @@
     revealNodes.forEach((el) => el.classList.add("visible"));
   }
 
-  // ===== FETCH EN VIVO DEL ÚLTIMO RELEASE DE GITHUB =====
+  // ===== DESCARGA AUTOMÁTICA DE LA ÚLTIMA VERSIÓN PUBLICADA =====
   const badgeText = document.getElementById("live-release-badge");
   const downloadBtn = document.getElementById("download-apk-btn");
   const navDownloadBtn = document.getElementById("nav-download-btn");
   const metaVersion = document.getElementById("meta-version");
   const metaSize = document.getElementById("meta-size");
-  const metaArch = document.getElementById("meta-arch");
   const abiContainer = document.getElementById("abi-selector");
-  const changelogTitle = document.getElementById("changelog-title");
-  const changelogBody = document.getElementById("changelog-body");
 
   function formatMb(bytes) {
-    if (!bytes || bytes <= 0) return "~21 MB";
+    if (!bytes || bytes <= 0) return "~22 MB";
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 
-  function detectArchLabel(fileName) {
+  function friendlyArchLabel(fileName) {
     const lower = (fileName || "").toLowerCase();
-    if (lower.includes("arm64")) return "ARM64 (Recomendado)";
-    if (lower.includes("armeabi")) return "ARMv7 (32-bit)";
-    if (lower.includes("x86_64")) return "x86_64";
-    return "Universal APK";
+    if (lower.includes("arm64")) return "Celulares modernos (Recomendado)";
+    if (lower.includes("armeabi")) return "Celulares antiguos (32-bit)";
+    return "Versión Universal";
   }
 
   function applySelectedApk(asset, tag) {
     if (!asset) return;
     if (downloadBtn) {
       downloadBtn.href = asset.browser_download_url;
-      downloadBtn.innerHTML = `<span>⬇</span> Descargar APK ${tag}`;
+      downloadBtn.innerHTML = `<span>⬇</span> Descargar Audibuuks ${tag}`;
     }
     if (navDownloadBtn) {
       navDownloadBtn.href = asset.browser_download_url;
     }
     if (metaSize) metaSize.textContent = formatMb(asset.size);
-    if (metaArch) metaArch.textContent = detectArchLabel(asset.name);
   }
 
   async function loadLatestRelease() {
@@ -226,21 +214,15 @@
       if (!res.ok) throw new Error("No release yet");
       const release = await res.json();
 
-      const tag = release.tag_name || "v1.0.0";
+      const tag = release.tag_name || "v1.1.0";
       const apks = (release.assets || []).filter((a) =>
         (a.name || "").toLowerCase().endsWith(".apk")
       );
 
       if (badgeText) {
-        badgeText.textContent = `Último Release (${tag}) · Android 7.0+ ARM64 · Auto-Updates OTA`;
+        badgeText.textContent = `Versión ${tag} disponible · Gratis para Android · Por Lukgtz`;
       }
       if (metaVersion) metaVersion.textContent = tag;
-      if (changelogTitle) {
-        changelogTitle.textContent = release.name || `Audibuuks ${tag}`;
-      }
-      if (changelogBody && release.body) {
-        changelogBody.textContent = release.body.trim();
-      }
 
       if (apks.length > 0) {
         const preferred =
@@ -252,7 +234,7 @@
             .map(
               (a, idx) => `
               <button type="button" class="abi-chip ${a === preferred ? "active" : ""}" data-apk-idx="${idx}">
-                ${detectArchLabel(a.name)} · ${formatMb(a.size)}
+                ${friendlyArchLabel(a.name)} · ${formatMb(a.size)}
               </button>`
             )
             .join("");
@@ -270,7 +252,6 @@
         downloadBtn.href = release.html_url || FALLBACK_RELEASES_URL;
       }
     } catch (_) {
-      // Fallback limpio si GitHub API tiene rate-limit o no hay conexión
       if (downloadBtn) downloadBtn.href = FALLBACK_RELEASES_URL;
       if (navDownloadBtn) navDownloadBtn.href = FALLBACK_RELEASES_URL;
     }

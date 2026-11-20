@@ -3,10 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Audibuuks — Convertí tus libros PDF y EPUB en audiolibros en español</title>
+  <title>Audibuuks — Convertí tus libros PDF y eBooks en audiolibros gratis</title>
   <meta
     name="description"
-    content="Escuchá cualquier libro en PDF o EPUB con voces humanas naturales, traducí libros en inglés al español automáticamente, descargá para escuchar sin internet y guardá tus notas. Gratis para Android."
+    content="Convertí tus libros PDF y EPUB en audiolibros reales gratis, sin pagar Audible. Escuchá con voces humanas, anotá cada capítulo, traducí libros en inglés al español y descargá para escuchar sin internet."
   />
   <meta name="theme-color" content="#090a0e" />
   <link rel="icon" type="image/png" href="screenshots/logo.png" />
@@ -19,6 +19,7 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
+  <div id="scroll-progress" class="scroll-progress" aria-hidden="true"></div>
   <div class="bg-mesh" aria-hidden="true"></div>
   <div class="bg-grid" aria-hidden="true"></div>
 
@@ -34,11 +35,11 @@
       </a>
 
       <nav class="nav-links" aria-label="Navegación principal">
-        <a href="#funciones">Qué hace</a>
+        <a href="#porque">Por qué existe</a>
+        <a href="#recorrido">Capturas</a>
         <a href="#traductor">Inglés a Español</a>
-        <a href="#recorrido">Cómo se ve</a>
+        <a href="#funciones">Funciones</a>
         <a href="#voces">Voces</a>
-        <a href="#instalar">Instalar</a>
         <a href="#creador">Creador</a>
       </nav>
 
@@ -75,14 +76,14 @@
           </div>
 
           <h1>
-            Escuchá tus <span class="text-gradient">libros y apuntes</span> como audiolibros reales.
+            Convertí tus <span class="text-gradient">PDF y eBooks</span> en audiolibros, gratis.
           </h1>
 
           <p class="hero-lead">
-            Subí cualquier archivo <strong>PDF o EPUB</strong> desde tu celular o Google Drive y
-            escuchalo con <strong>voces naturales que suenan humanas</strong>. ¿Tu libro está en
-            inglés? <strong>Audibuuks lo traduce automáticamente al español y te lo lee en voz alta.</strong>
-            Además podés descargar capítulos para escuchar sin internet y seguir la lectura palabra por palabra.
+            No hace falta pagar Audible ni suscripciones mensuales. Cargá cualquier libro o apunte en
+            <strong>PDF o EPUB</strong>, escuchalo con <strong>voces naturales</strong>, guardá
+            <strong>notas en cada sección</strong>, descargá para viajar <strong>sin internet</strong>
+            y traducí libros en inglés al español con un toque.
           </p>
 
           <div class="hero-cta-row">
@@ -96,7 +97,7 @@
               <span>⬇</span> Descargar Audibuuks v1.1.1
             </a>
             <a class="btn btn-ghost btn-lg" href="#recorrido">
-              Ver cómo funciona
+              Ver capturas reales
             </a>
             <a
               class="btn btn-ghost btn-lg"
@@ -112,15 +113,15 @@
             <span class="apk-meta-item">Versión: <strong id="meta-version">v1.1.1</strong></span>
             <span class="apk-meta-item">Peso: <strong id="meta-size">22.5 MB</strong></span>
             <span class="apk-meta-item">Para: <strong>Android</strong></span>
-            <span class="apk-meta-item">Precio: <strong>100% Gratis · Sin anuncios</strong></span>
+            <span class="apk-meta-item">Costo: <strong>100% Gratis · Sin anuncios</strong></span>
           </div>
 
           <div id="abi-selector" class="abi-selector" aria-label="Opciones de descarga"></div>
 
           <div class="hero-eq-card">
             <div class="hero-eq-label">
-              <strong>Escuchá con la pantalla apagada</strong>
-              Ideal para viajar en colectivo, caminar, entrenar, estudiar o antes de dormir.
+              <strong>Escuchá mientras viajás, estudiás o descansás</strong>
+              Sigue sonando con la pantalla apagada y recordando el segundo exacto.
             </div>
             <canvas
               id="hero-eq-canvas"
@@ -136,28 +137,247 @@
           <div class="hero-glow" aria-hidden="true"></div>
 
           <div class="floating-pill pill-top-left">
+            <span>📚</span>
+            <div>
+              PDF &amp; EPUB → Audiolibro
+              <span class="sub">Sin pagar Audible</span>
+            </div>
+          </div>
+
+          <div class="dual-phones">
+            <div class="phone-frame phone-front">
+              <div class="phone-screen">
+                <img
+                  src="screenshots/player_portada.jpg"
+                  alt="Audibuuks reproduciendo un libro con su portada real y fondo de color ambiental"
+                />
+              </div>
+            </div>
+
+            <div class="phone-frame phone-back">
+              <div class="phone-screen">
+                <img
+                  src="screenshots/karaoke_texto.jpg"
+                  alt="Audibuuks leyendo en vivo y resaltando cada palabra hablada"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div class="floating-pill pill-bottom-left">
+            <span>📝</span>
+            <div>
+              Notas por sección
+              <span class="sub">Anotá tus ideas al escuchar</span>
+            </div>
+          </div>
+
+          <div class="floating-pill pill-bottom-right">
             <span>🌎</span>
             <div>
               Inglés → Español
               <span class="sub">Traduce y narra tu libro</span>
             </div>
           </div>
+        </div>
+      </div>
+    </section>
 
-          <div class="phone-frame">
-            <div class="phone-screen">
-              <img
-                src="screenshots/player.png"
-                alt="Audibuuks reproduciendo un libro y resaltando cada palabra"
-              />
+    <!-- EL PORQUÉ DE AUDIBUUKS -->
+    <section class="section" id="porque">
+      <div class="container">
+        <div class="why-banner reveal">
+          <span class="eyebrow">💛 El porqué de Audibuuks</span>
+          <h2>Porque leer o escuchar un buen libro no debería depender de poder pagar Audible.</h2>
+          <p>
+            Muchas personas no podemos pagar suscripciones caras en dólares todos los meses — o
+            ya tenemos nuestros libros en PDF, EPUB o apuntes de estudio guardados en el celular.
+            <strong>Audibuuks</strong> nació con una idea simple: darte una app gratuita, linda y
+            potente para <strong>convertir tus propios libros en audiolibros reales</strong>,
+            escucharlos mientras hacés otras cosas y <strong>anotar lo importante de cada sección</strong>.
+          </p>
+        </div>
+
+        <div class="why-grid">
+          <article class="why-card reveal" data-delay="0">
+            <div class="why-icon">💸</div>
+            <h3>0 suscripciones, 0 anuncios</h3>
+            <p>
+              No tenés que pagar membresías mensuales ni comprar libro por libro. Si ya tenés el
+              PDF o el eBook, lo cargás y lo escuchás al instante gratis.
+            </p>
+          </article>
+
+          <article class="why-card reveal" data-delay="90">
+            <div class="why-icon">🎧</div>
+            <h3>Aprovechá cada momento del día</h3>
+            <p>
+              Caminando, viajando en colectivo, entrenando o antes de dormir: convertí tus horas
+              libres en lectura real con voces naturales y música suave de piano.
+            </p>
+          </article>
+
+          <article class="why-card reveal" data-delay="180">
+            <div class="why-icon">📝</div>
+            <h3>Escuchá y anotá cada capítulo</h3>
+            <p>
+              ¿Escuchaste una frase clave o algo para estudiar? Abrí la nota de esa sección,
+              guardala con colores y tené todos tus resúmenes ordenados capítulo por capítulo.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <!-- CAPTURAS REALES + RECORRIDO INTERACTIVO -->
+    <section class="section" id="recorrido">
+      <div class="container">
+        <div class="section-header reveal">
+          <span class="eyebrow">📱 Capturas reales de la app</span>
+          <h2>Mirá cómo se ve Audibuuks funcionando en un celular real.</h2>
+          <p>
+            Tocá cualquiera de las pantallas de abajo para explorarla en detalle: portada dinámica,
+            lectura palabra por palabra, lista de capítulos con notas y biblioteca.
+          </p>
+        </div>
+
+        <!-- Tira visual de 4 capturas reales -->
+        <div class="screens-gallery">
+          <article class="screen-card active reveal" data-wt-target="0" data-delay="0">
+            <div class="screen-thumb">
+              <img src="screenshots/player_portada.jpg" alt="Reproductor con portada real del libro" loading="lazy" />
             </div>
+            <div class="screen-meta">
+              <strong>Modo Portada</strong>
+              <span>Portada real del libro con fondo de color dinámico y controles cómodos.</span>
+            </div>
+          </article>
+
+          <article class="screen-card reveal" data-wt-target="1" data-delay="80">
+            <div class="screen-thumb">
+              <img src="screenshots/karaoke_texto.jpg" alt="Lectura karaoke resaltando palabra por palabra" loading="lazy" />
+            </div>
+            <div class="screen-meta">
+              <strong>Karaoke en Vivo</strong>
+              <span>Resalta el párrafo y cada palabra exacta mientras suena la voz.</span>
+            </div>
+          </article>
+
+          <article class="screen-card reveal" data-wt-target="2" data-delay="160">
+            <div class="screen-thumb">
+              <img src="screenshots/capitulos_notas.jpg" alt="Capítulos descargables sin internet y notas por sección" loading="lazy" />
+            </div>
+            <div class="screen-meta">
+              <strong>Capítulos y Notas</strong>
+              <span>Descargá todo para escuchar offline y guardá notas por sección.</span>
+            </div>
+          </article>
+
+          <article class="screen-card reveal" data-wt-target="3" data-delay="240">
+            <div class="screen-thumb">
+              <img src="screenshots/home.png" alt="Biblioteca de libros PDF y EPUB" loading="lazy" />
+            </div>
+            <div class="screen-meta">
+              <strong>Tu Biblioteca</strong>
+              <span>Cargá desde tu celular o Google Drive y seguí justo donde dejaste.</span>
+            </div>
+          </article>
+        </div>
+
+        <!-- Visor interactivo con auto-avance -->
+        <div class="walkthrough-layout reveal">
+          <div class="walkthrough-tabs" role="tablist" aria-label="Pantallas de Audibuuks">
+            <button
+              type="button"
+              class="wt-tab active"
+              role="tab"
+              aria-selected="true"
+              data-wt-index="0"
+            >
+              <div class="wt-tab-title">🎨 Modo Portada con color ambiental</div>
+              <p class="wt-tab-desc">
+                Muestra la tapa del libro, adapta los colores del fondo y te da acceso rápido a
+                velocidad, temporizador y música de fondo.
+              </p>
+              <span class="wt-tab-progress" aria-hidden="true"></span>
+            </button>
+
+            <button
+              type="button"
+              class="wt-tab"
+              role="tab"
+              aria-selected="false"
+              data-wt-index="1"
+            >
+              <div class="wt-tab-title">✨ Lectura Karaoke palabra por palabra</div>
+              <p class="wt-tab-desc">
+                Ilumina cada palabra mientras la escuchás y te deja tocar cualquier frase para
+                saltar directo ahí (tanto en texto limpio como sobre el PDF).
+              </p>
+              <span class="wt-tab-progress" aria-hidden="true"></span>
+            </button>
+
+            <button
+              type="button"
+              class="wt-tab"
+              role="tab"
+              aria-selected="false"
+              data-wt-index="2"
+            >
+              <div class="wt-tab-title">📝 Capítulos offline y + Nota de sección</div>
+              <p class="wt-tab-desc">
+                Bajá capítulos o el libro completo con 1 toque para escuchar sin internet y anotá
+                resúmenes en cada sección.
+              </p>
+              <span class="wt-tab-progress" aria-hidden="true"></span>
+            </button>
+
+            <button
+              type="button"
+              class="wt-tab"
+              role="tab"
+              aria-selected="false"
+              data-wt-index="3"
+            >
+              <div class="wt-tab-title">📚 Biblioteca y carga desde Google Drive</div>
+              <p class="wt-tab-desc">
+                Filtros por Favoritos, Continuar y Terminados, cambio de portada manual y aviso
+                automático de nuevas versiones.
+              </p>
+              <span class="wt-tab-progress" aria-hidden="true"></span>
+            </button>
+
+            <button
+              type="button"
+              class="wt-tab"
+              role="tab"
+              aria-selected="false"
+              data-wt-index="4"
+            >
+              <div class="wt-tab-title">🌙 Modo oscuro cuidado desde el inicio</div>
+              <p class="wt-tab-desc">
+                Pantalla de inicio animada con ecualizador en vivo y diseño pensado para leer de
+                noche sin cansar la vista.
+              </p>
+              <span class="wt-tab-progress" aria-hidden="true"></span>
+            </button>
           </div>
 
-          <div class="floating-pill pill-bottom-right">
-            <span>📶</span>
-            <div>
-              Modo Sin Internet
-              <span class="sub">Descargá y escuchá donde quieras</span>
+          <div class="walkthrough-stage" role="tabpanel">
+            <div class="stage-image-wrap">
+              <div class="stage-phone-bezel">
+                <img
+                  id="walkthrough-img"
+                  src="screenshots/player_portada.jpg"
+                  alt="Reproductor con portada real del libro y colores ambientales"
+                />
+              </div>
             </div>
+            <p id="walkthrough-caption" class="stage-caption">
+              Modo Portada: muestra la tapa de tu libro con un fondo ambiental que toma los colores
+              de la portada, barra de progreso del capítulo, temporizador de sueño (zZz), velocidad
+              y cambio rápido de voz.
+            </p>
           </div>
         </div>
       </div>
@@ -175,8 +395,8 @@
             <p style="margin: 0 0 18px; color: var(--text-secondary); font-size: 0.98rem;">
               Cuando cargás un PDF o EPUB en inglés, Audibuuks lo detecta automáticamente y te
               pregunta si querés <strong>traducirlo al español</strong> o escucharlo en su idioma
-              original. Lo traduce mientras empezás a escuchar — sin esperas eternas — y podés
-              cambiar entre inglés y español cuando quieras con un solo toque.
+              original. Empieza a narrar enseguida mientras traduce el resto en segundo plano, y
+              podés alternar entre inglés y español cuando quieras.
             </p>
             <div class="feature-tags">
               <span class="mini-tag">✓ Detecta el idioma solo</span>
@@ -196,7 +416,7 @@
             <div class="lang-box translated">
               <span class="lang-pill">🇪🇸 Audiolibro en Español (Voz natural)</span>
               <p class="lang-quote">
-                "El éxito es el producto de los hábitos diarios, no de transformaciones que ocurren una sola vez en la vida."
+                "El éxito es el producto de los <span class="karaoke-sim-word">hábitos</span> diarios, no de transformaciones que ocurren una sola vez en la vida."
               </p>
             </div>
           </div>
@@ -209,50 +429,47 @@
       <div class="container">
         <div class="section-header reveal">
           <span class="eyebrow">✨ Todo en una sola app</span>
-          <h2>Pensada para que leer y escuchar tus libros sea un placer.</h2>
+          <h2>Todo lo que necesitás para escuchar, leer y estudiar tus libros.</h2>
           <p>
-            Sin suscripciones, sin límites de libros y sin voces robóticas. Todo lo que necesitás
-            para estudiar, leer novelas o aprovechar tus viajes diarios.
+            Pensada tanto para disfrutar novelas como para estudiar apuntes de la facultad o leer
+            libros técnicos sin gastar un peso.
           </p>
         </div>
 
         <div class="features-grid">
-          <article class="feature-card reveal">
+          <article class="feature-card reveal" data-delay="0">
             <div class="feature-icon">🎙️</div>
             <h3>Voces que suenan humanas</h3>
             <p>
               Elegí entre 13 voces naturales de Argentina, México, Colombia, España, EE. UU. y
-              Reino Unido. Ajustá la velocidad desde relajada (0.7x) hasta rápida (2.0x) para
-              estudiar más rápido.
+              Reino Unido. Ajustá la velocidad de 0.7x a 2.0x según tu ritmo.
             </p>
             <div class="feature-tags">
               <span class="mini-tag">13 voces naturales</span>
-              <span class="mini-tag">Velocidad 0.7x–2.0x</span>
+              <span class="mini-tag">0.7x – 2.0x</span>
             </div>
           </article>
 
-          <article class="feature-card reveal">
+          <article class="feature-card reveal" data-delay="70">
             <div class="feature-icon">📖</div>
-            <h3>Leé tu PDF y tocá cualquier frase</h3>
+            <h3>Tocá cualquier oración y escuchá</h3>
             <p>
-              Seguí la lectura con resaltado palabra por palabra sobre tu PDF original o en modo
-              texto limpio. Tocá cualquier oración para empezar a escuchar justo desde ahí, buscá
-              palabras, hacé zoom cómodo o cambiá a modo Sepia / Noche.
+              Seguí la lectura palabra por palabra o abrí tu PDF original con buscador, zoom a una
+              mano, vista en cuadrícula de páginas y modo Sepia o Noche.
             </p>
             <div class="feature-tags">
-              <span class="mini-tag">Toque instantáneo</span>
-              <span class="mini-tag">Buscador</span>
+              <span class="mini-tag">Toque al instante</span>
+              <span class="mini-tag">Buscador PDF</span>
               <span class="mini-tag">Modo Noche</span>
             </div>
           </article>
 
-          <article class="feature-card reveal">
+          <article class="feature-card reveal" data-delay="140">
             <div class="feature-icon">📥</div>
             <h3>Escuchá sin internet donde sea</h3>
             <p>
-              Descargá un capítulo o el libro completo rapidísimo incluso con la pantalla apagada.
-              Perfecto para el subte, viajes en ruta o avión sin gastar datos móviles ni sufrir
-              cortes.
+              Descargá capítulos sueltos o el libro entero rapidísimo incluso con la pantalla
+              apagada. Ideal para el colectivo, subte, ruta o avión.
             </p>
             <div class="feature-tags">
               <span class="mini-tag">Descarga rápida 5x</span>
@@ -260,86 +477,84 @@
             </div>
           </article>
 
-          <article class="feature-card reveal">
+          <article class="feature-card reveal" data-delay="0">
             <div class="feature-icon">☁️</div>
-            <h3>Cargá desde tu celular o Google Drive</h3>
+            <h3>Subí desde tu celular o Google Drive</h3>
             <p>
-              Importá tus archivos PDF y EPUB en un toque o pegá directamente un enlace compartido
-              de Google Drive (incluso libros pesados de más de 100 MB) y Audibuuks arma los
-              capítulos automáticamente.
+              Importá tus PDF y EPUB en segundos o pegá un enlace compartido de Google Drive
+              (incluso libros grandes de más de 100 MB) y elegí o cambiá la portada cuando quieras.
             </p>
             <div class="feature-tags">
               <span class="mini-tag">PDF &amp; EPUB</span>
               <span class="mini-tag">Google Drive</span>
+              <span class="mini-tag">Elegir portada</span>
             </div>
           </article>
 
-          <article class="feature-card reveal">
+          <article class="feature-card reveal" data-delay="70">
             <div class="feature-icon">🎹</div>
-            <h3>Música de piano, notas y temporizador</h3>
+            <h3>Piano clásico, notas y Sleep Timer</h3>
             <p>
-              Agregá música clásica suave de fondo para concentrarte, guardá apuntes con colores
-              en cada capítulo y activá el temporizador de sueño para que el volumen baje suave
-              hasta apagarse solo.
+              Acompañá tus libros con música clásica suave de fondo, guardá notas con colores en
+              cada sección y programá el apagado automático para dormir.
             </p>
             <div class="feature-tags">
               <span class="mini-tag">Piano de fondo</span>
-              <span class="mini-tag">Notas por capítulo</span>
+              <span class="mini-tag">Notas por sección</span>
               <span class="mini-tag">Sleep Timer</span>
             </div>
           </article>
 
-          <article class="feature-card reveal">
+          <article class="feature-card reveal" data-delay="140">
             <div class="feature-icon">🔄</div>
             <h3>Se actualiza sola dentro de la app</h3>
             <p>
-              Cuando salen nuevas funciones o mejoras, Audibuuks te avisa directamente en tu
-              biblioteca. Tocás "Actualizar ahora" y se instala encima conservando todos tus
-              libros, notas y progreso intactos.
+              Cuando salen mejoras, Audibuuks te avisa directamente en tu Biblioteca. Tocás
+              "Actualizar ahora" y se instala encima sin borrar tus libros ni notas.
             </p>
             <div class="feature-tags">
               <span class="mini-tag">Aviso automático</span>
-              <span class="mini-tag">Sin perder tus libros</span>
+              <span class="mini-tag">Sin perder nada</span>
             </div>
           </article>
         </div>
       </div>
     </section>
 
-    <!-- POR QUÉ SE SIENTE TAN FLUIDA (BENEFICIOS CLAROS) -->
+    <!-- EXPERIENCIA FLUIDA -->
     <section class="section" id="experiencia">
       <div class="container">
         <div class="section-header reveal">
-          <span class="eyebrow">🚀 Experiencia pensada al detalle</span>
-          <h2>Rápida, cómoda y sin cortes molestos.</h2>
+          <span class="eyebrow">🚀 Pensada para usar todos los días</span>
+          <h2>Rápida, potente y sin cortes molestos.</h2>
           <p>
-            Hecha para acompañarte todos los días sin trabarse a mitad de un capítulo ni gastar
-            batería de más.
+            Diseñada para que nunca te quedes trabado a mitad de un capítulo ni tengas que
+            reiniciar la app.
           </p>
         </div>
 
         <div class="bench-list">
           <article class="bench-card" style="--fill: 100%;">
             <div class="bench-top">
-              <span class="bench-title">Respuesta al tocar una frase del libro</span>
-              <span class="bench-value">Al instante</span>
+              <span class="bench-title">Claridad y potencia de voz</span>
+              <span class="bench-value">Audio realzado</span>
             </div>
             <div class="bench-bar-track"><div class="bench-bar-fill"></div></div>
             <p class="bench-desc">
-              Tocás cualquier oración en tu PDF o EPUB y la voz salta directo a ese punto sin que
-              la página salte sola a otra hoja.
+              Voz clara y potente desde el primer segundo, equilibrada automáticamente con la música
+              de fondo para escuchar cómodo en la calle o en casa.
             </p>
           </article>
 
-          <article class="bench-card" style="--fill: 94%;">
+          <article class="bench-card" style="--fill: 95%;">
             <div class="bench-top">
               <span class="bench-title">Velocidad al descargar capítulos offline</span>
               <span class="bench-value">5x más rápido</span>
             </div>
             <div class="bench-bar-track"><div class="bench-bar-fill"></div></div>
             <p class="bench-desc">
-              Baja varios párrafos a la vez y va pre-cargando lo que viene adelante tuyo (como un
-              video de YouTube) para que no haya pausas.
+              Descarga varios párrafos en simultáneo y va preparando lo que sigue adelante tuyo
+              para que no haya pausas entre frases.
             </p>
           </article>
 
@@ -350,96 +565,22 @@
             </div>
             <div class="bench-bar-track"><div class="bench-bar-fill"></div></div>
             <p class="bench-desc">
-              Recuerda el segundo exacto donde dejaste cada libro y guarda cada letra de tus notas
-              al instante, incluso si se te apaga el celular.
+              Recuerda el segundo exacto donde dejaste cada libro y guarda cada palabra de tus
+              notas al instante.
             </p>
           </article>
 
           <article class="bench-card" style="--fill: 100%;">
             <div class="bench-top">
-              <span class="bench-title">Continuidad al apagar la pantalla</span>
-              <span class="bench-value">Sin cortes</span>
+              <span class="bench-title">Continuidad con pantalla apagada</span>
+              <span class="bench-value">Sin trabas</span>
             </div>
             <div class="bench-bar-track"><div class="bench-bar-fill"></div></div>
             <p class="bench-desc">
-              Podés guardar el teléfono en el bolsillo y controlar pausa o avance desde la
-              pantalla de bloqueo o tus auriculares Bluetooth.
+              Guardá el teléfono en el bolsillo y controlá pausa o avance desde la pantalla de
+              bloqueo o tus auriculares Bluetooth sin cortes.
             </p>
           </article>
-        </div>
-      </div>
-    </section>
-
-    <!-- RECORRIDO REAL EN DISPOSITIVO -->
-    <section class="section" id="recorrido">
-      <div class="container">
-        <div class="section-header reveal">
-          <span class="eyebrow">📱 Así se ve Audibuuks</span>
-          <h2>Una interfaz limpia, oscura y súper fácil de usar.</h2>
-          <p>
-            Tocá cada pantalla para conocer cómo funciona la app en tu celular.
-          </p>
-        </div>
-
-        <div class="walkthrough-layout reveal">
-          <div class="walkthrough-tabs" role="tablist" aria-label="Pantallas de Audibuuks">
-            <button
-              type="button"
-              class="wt-tab active"
-              role="tab"
-              aria-selected="true"
-              data-wt-index="0"
-            >
-              <div class="wt-tab-title">🎧 Reproductor con texto en vivo</div>
-              <p class="wt-tab-desc">
-                Seguí cada palabra resaltada en tiempo real, regulá la velocidad, cambiá de voz o
-                abí tus notas de la sección.
-              </p>
-            </button>
-
-            <button
-              type="button"
-              class="wt-tab"
-              role="tab"
-              aria-selected="false"
-              data-wt-index="1"
-            >
-              <div class="wt-tab-title">📚 Tu Biblioteca Inteligente</div>
-              <p class="wt-tab-desc">
-                Todos tus libros ordenados por favoritos o en curso, con carga rápida desde tu
-                teléfono o Google Drive.
-              </p>
-            </button>
-
-            <button
-              type="button"
-              class="wt-tab"
-              role="tab"
-              aria-selected="false"
-              data-wt-index="2"
-            >
-              <div class="wt-tab-title">✨ Identidad propia y modo oscuro</div>
-              <p class="wt-tab-desc">
-                Diseño moderno en tonos oscuros y ámbar que cuida tu vista tanto de día como
-                leyendo de noche.
-              </p>
-            </button>
-          </div>
-
-          <div class="walkthrough-stage" role="tabpanel">
-            <div class="stage-image-wrap">
-              <img
-                id="walkthrough-img"
-                src="screenshots/player.png"
-                alt="Reproductor de Audibuuks leyendo y subrayando palabra por palabra"
-              />
-            </div>
-            <p id="walkthrough-caption" class="stage-caption">
-              Mientras escuchás, Audibuuks te muestra el texto y resalta cada palabra en vivo. Podés
-              cambiar la velocidad, elegir tu voz favorita, agregar música suave de piano o anotar
-              ideas sin salir del libro.
-            </p>
-          </div>
         </div>
       </div>
     </section>
@@ -452,7 +593,7 @@
           <h2>Elegí la voz que mejor acompañe tu lectura.</h2>
           <p>
             Voces cálidas y expresivas en español de Latinoamérica y España, más voces nativas en
-            inglés si preferís practicar o escuchar libros en su idioma original.
+            inglés si preferís escuchar en idioma original.
           </p>
         </div>
 
@@ -477,9 +618,10 @@
       <div class="container">
         <div class="section-header reveal">
           <span class="eyebrow">⚖️ Comparación Simple</span>
-          <h2>¿Por qué elegir Audibuuks?</h2>
+          <h2>Audibuuks vs. plataformas pagas como Audible.</h2>
           <p>
-            Todo lo mejor de un lector de libros y una app de audiolibros, gratis y sin anuncios.
+            Todo lo mejor de un lector de libros y un reproductor de audiolibros, usando tus
+            propios archivos y sin pagar suscripciones.
           </p>
         </div>
 
@@ -489,16 +631,16 @@
               <tr>
                 <th>Lo que necesitás</th>
                 <th class="highlight-col">Audibuuks</th>
+                <th>Audible / Apps pagas</th>
                 <th>Lectores PDF comunes</th>
-                <th>Apps de audiolibros pagas</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td>Usar tus propios libros y apuntes (PDF / EPUB)</td>
+                <td>Usar tus propios PDF, eBooks y apuntes</td>
                 <td class="highlight-col"><span class="ok-badge">✓</span> Ilimitados (celular y Google Drive)</td>
-                <td>Solo texto o voz robótica</td>
                 <td>No te dejan subir tus libros</td>
+                <td>Solo lectura visual o voz robótica</td>
               </tr>
               <tr>
                 <td>Traducir libros en inglés a audiolibro en español</td>
@@ -509,26 +651,20 @@
               <tr>
                 <td>Escuchar sin internet en cualquier viaje</td>
                 <td class="highlight-col"><span class="ok-badge">✓</span> Descargá capítulos o libros enteros</td>
-                <td>No incluido</td>
                 <td>Solo pagando suscripción</td>
-              </tr>
-              <tr>
-                <td>Notas por capítulo + música de piano suave</td>
-                <td class="highlight-col"><span class="ok-badge">✓</span> Todo integrado en la app</td>
-                <td>Muy limitado</td>
                 <td>No incluido</td>
               </tr>
               <tr>
-                <td>Actualizaciones fáciles</td>
-                <td class="highlight-col"><span class="ok-badge">✓</span> Te avisa adentro de la app</td>
-                <td>Manual</td>
-                <td>Tienda oficial</td>
+                <td>Notas por sección + karaoke palabra por palabra</td>
+                <td class="highlight-col"><span class="ok-badge">✓</span> Todo integrado en la app</td>
+                <td>Sin notas por sección en PDF</td>
+                <td>Muy limitado</td>
               </tr>
               <tr>
-                <td>Costo mensual y publicidad</td>
+                <td>Precio mensual y publicidad</td>
                 <td class="highlight-col"><span class="ok-badge">✓</span> 100% Gratis · Sin anuncios</td>
-                <td>Anuncios o planes pagos</td>
-                <td>Suscripción mensual</td>
+                <td>Suscripción mensual en dólares</td>
+                <td>Anuncios o funciones bloqueadas</td>
               </tr>
             </tbody>
           </table>
@@ -549,16 +685,16 @@
         </div>
 
         <div class="steps-grid reveal">
-          <article class="step-card">
+          <article class="step-card" data-delay="0">
             <span class="step-num">01</span>
             <h3>Tocá "Descargar Audibuuks"</h3>
             <p>
               Presioná el botón dorado de arriba para bajar el instalador oficial de la última
-              versión (pesa solo ~22 MB).
+              versión (pesa solo ~22.5 MB).
             </p>
           </article>
 
-          <article class="step-card">
+          <article class="step-card" data-delay="80">
             <span class="step-num">02</span>
             <h3>Abrilo e instalá</h3>
             <p>
@@ -567,7 +703,7 @@
             </p>
           </article>
 
-          <article class="step-card">
+          <article class="step-card" data-delay="160">
             <span class="step-num">03</span>
             <h3>Cargá tu primer libro y disfrutá</h3>
             <p>
@@ -610,9 +746,9 @@
               </div>
               <h3>Creada por Luciano Gutierrez (Lukgtz)</h3>
               <p>
-                Audibuuks nació para hacer la lectura accesible en cualquier momento del día,
-                convirtiendo libros, apuntes de estudio y textos en inglés en audiolibros cómodos y
-                gratuitos para todos. ¿Tenés una idea o querés seguir los próximos proyectos?
+                Audibuuks nació con el objetivo de acercar la lectura y los audiolibros a todo el
+                mundo de forma gratuita: para estudiar, leer novelas o entender libros en inglés sin
+                depender de plataformas pagas como Audible.
               </p>
             </div>
           </div>
@@ -649,11 +785,29 @@
 
         <div class="faq-list reveal">
           <details class="faq-item" open>
-            <summary>¿Realmente traduce libros enteros que están en inglés al español?</summary>
+            <summary>¿Realmente puedo usar mis propios PDF y EPUB gratis sin pagar Audible?</summary>
+            <p>
+              Sí. Audibuuks es 100% gratis, no tiene anuncios y no te cobra por libros ni por
+              horas de escucha. Subís tus PDF, EPUB o apuntes y los escuchás al instante como un
+              audiolibro profesional.
+            </p>
+          </details>
+
+          <details class="faq-item">
+            <summary>¿También traduce libros que están en inglés al español?</summary>
             <p>
               Sí. Apenas cargás un libro en inglés, Audibuuks lo detecta solo y te da la opción de
               traducirlo al español para leerlo y escucharlo con voces en español. Además podés
               volver al inglés original cuando quieras con un solo toque.
+            </p>
+          </details>
+
+          <details class="faq-item">
+            <summary>¿Puedo cambiar la portada de un libro que ya subí?</summary>
+            <p>
+              Sí. Tocá los 3 puntitos en cualquier libro de tu biblioteca y elegí
+              <strong>Cambiar portada</strong>: podés seleccionar cualquier página de tu PDF, subir
+              una foto de tu galería o buscar la tapa oficial online.
             </p>
           </details>
 
@@ -670,21 +824,6 @@
             <p>
               Sí. Podés descargar capítulos sueltos o el libro completo con un toque desde la lista
               de capítulos para escuchar en el colectivo, subte o avión sin usar datos móviles.
-            </p>
-          </details>
-
-          <details class="faq-item">
-            <summary>¿Es gratis de verdad? ¿Tiene anuncios?</summary>
-            <p>
-              Es 100% gratis y no tiene publicidad molesta ni límites de cantidad de libros.
-            </p>
-          </details>
-
-          <details class="faq-item">
-            <summary>¿Mis libros y PDF quedan seguros en mi celular?</summary>
-            <p>
-              Sí. Tus documentos y tus notas se guardan directamente en tu teléfono y nadie más
-              tiene acceso a tu biblioteca.
             </p>
           </details>
         </div>

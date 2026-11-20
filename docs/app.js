@@ -21,30 +21,54 @@
     { name: "Sonia", flag: "🇬🇧", region: "Reino Unido", style: "Voz británica suave y prolija", lang: "en", badge: "British" },
   ];
 
-  // 2. Recorrido real por la app (100% enfocado en la experiencia de usuario)
+  // 2. Recorrido con TODAS las capturas reales subidas
   const WALKTHROUGH_ITEMS = [
     {
-      img: "screenshots/player.png",
-      alt: "Reproductor de Audibuuks leyendo y subrayando palabra por palabra",
+      img: "screenshots/player_portada.jpg",
+      alt: "Reproductor con portada real del libro y colores ambientales",
       caption:
-        "Mientras escuchás, Audibuuks te muestra el texto y resalta cada palabra en vivo. Podés cambiar la velocidad, elegir tu voz favorita, agregar música suave de piano o anotar ideas sin salir del libro.",
-      wide: false,
+        "Modo Portada: muestra la tapa de tu libro con un fondo ambiental que toma los colores de la portada, barra de progreso del capítulo, temporizador de sueño (zZz), velocidad y cambio rápido de voz.",
+    },
+    {
+      img: "screenshots/karaoke_texto.jpg",
+      alt: "Lectura karaoke resaltando palabra por palabra en vivo",
+      caption:
+        "Modo Texto en Vivo: seguí la lectura con el párrafo destacado y cada palabra resaltada en el momento exacto en que suena la voz. Tocá cualquier frase para empezar a escuchar desde ahí.",
+    },
+    {
+      img: "screenshots/capitulos_notas.jpg",
+      alt: "Lista de 40 capítulos con descarga sin internet y notas por sección",
+      caption:
+        "Capítulos y Notas de Estudio: descargá capítulos individuales o el libro entero para escuchar sin internet, y guardá tus propias notas e ideas en cada sección del libro.",
     },
     {
       img: "screenshots/home.png",
-      alt: "Biblioteca personal de Audibuuks con portadas y progreso",
+      alt: "Biblioteca personal con filtros, portadas y carga desde Google Drive",
       caption:
-        "Todos tus PDF y EPUB organizados en un solo lugar, con portadas, porcentaje leído, filtros rápidos (Continuar, Terminados, Favoritos), carga directa desde Google Drive y aviso automático de actualizaciones.",
-      wide: false,
+        "Tu Biblioteca: organizá tus PDF y EPUB en Continuar, Terminados o Favoritos, cargá libros directo desde tu celular o Google Drive, y recibí avisos automáticos cuando haya una nueva versión.",
     },
     {
       img: "screenshots/splash.png",
-      alt: "Pantalla de inicio de Audibuuks diseñada por Lukgtz",
+      alt: "Pantalla de bienvenida de Audibuuks creada por Lukgtz",
       caption:
-        "Una experiencia cuidada desde el primer segundo: modo oscuro elegante para no cansar la vista y controles simples pensados para usar con una sola mano.",
-      wide: false,
+        "Identidad visual propia en tonos oscuros y ámbar, pensada para disfrutar tus lecturas de día o de noche sin cansar la vista.",
     },
   ];
+
+  // ===== BARRA DE PROGRESO AL SCROLLEAR =====
+  const scrollBar = document.getElementById("scroll-progress");
+  if (scrollBar) {
+    window.addEventListener(
+      "scroll",
+      () => {
+        const doc = document.documentElement;
+        const max = doc.scrollHeight - doc.clientHeight;
+        const pct = max > 0 ? (doc.scrollTop / max) * 100 : 0;
+        scrollBar.style.width = `${Math.min(100, Math.max(0, pct))}%`;
+      },
+      { passive: true }
+    );
+  }
 
   // ===== RENDER DE VOCES CON FILTRO =====
   const voicesGrid = document.getElementById("voices-grid");
@@ -77,36 +101,86 @@
   });
   renderVoices("all");
 
-  // ===== WALKTHROUGH INTERACTIVO =====
+  // ===== WALKTHROUGH INTERACTIVO + AUTO-ROTACIÓN SUAVE =====
   const wtTabs = document.querySelectorAll(".wt-tab");
+  const galleryCards = document.querySelectorAll(".screen-card");
   const wtImg = document.getElementById("walkthrough-img");
   const wtCaption = document.getElementById("walkthrough-caption");
+  const wtContainer = document.querySelector(".walkthrough-layout");
+
+  let activeWtIndex = 0;
+  let wtTimer = null;
+  const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  function selectWalkthrough(idx, fromUser = false) {
+    const item = WALKTHROUGH_ITEMS[idx];
+    if (!item || !wtImg || !wtCaption) return;
+    activeWtIndex = idx;
+
+    wtTabs.forEach((t, i) => {
+      const isMatch = i === idx;
+      t.classList.remove("active");
+      void t.offsetWidth; // reinicia animación de barra de progreso
+      if (isMatch) {
+        t.classList.add("active");
+      }
+      t.setAttribute("aria-selected", String(isMatch));
+    });
+
+    galleryCards.forEach((c) => {
+      const cardIdx = Number(c.dataset.wtTarget || -1);
+      c.classList.toggle("active", cardIdx === idx);
+    });
+
+    wtImg.style.opacity = "0";
+    wtImg.style.transform = "scale(0.97)";
+    setTimeout(() => {
+      wtImg.src = item.img;
+      wtImg.alt = item.alt;
+      wtCaption.textContent = item.caption;
+      wtImg.style.opacity = "1";
+      wtImg.style.transform = "scale(1)";
+    }, 150);
+
+    if (fromUser) {
+      restartWalkthroughTimer();
+    }
+  }
+
+  function restartWalkthroughTimer() {
+    if (wtTimer) clearInterval(wtTimer);
+    if (reducedMotion) return;
+    wtTimer = setInterval(() => {
+      const next = (activeWtIndex + 1) % WALKTHROUGH_ITEMS.length;
+      selectWalkthrough(next, false);
+    }, 5500);
+  }
 
   wtTabs.forEach((tab) => {
     tab.addEventListener("click", () => {
-      const idx = Number(tab.dataset.wtIndex || 0);
-      const item = WALKTHROUGH_ITEMS[idx];
-      if (!item || !wtImg || !wtCaption) return;
-
-      wtTabs.forEach((t) => {
-        t.classList.remove("active");
-        t.setAttribute("aria-selected", "false");
-      });
-      tab.classList.add("active");
-      tab.setAttribute("aria-selected", "true");
-
-      wtImg.style.opacity = "0";
-      wtImg.style.transform = "scale(0.98)";
-      setTimeout(() => {
-        wtImg.src = item.img;
-        wtImg.alt = item.alt;
-        wtImg.classList.toggle("is-wide", Boolean(item.wide));
-        wtCaption.textContent = item.caption;
-        wtImg.style.opacity = "1";
-        wtImg.style.transform = "scale(1)";
-      }, 150);
+      selectWalkthrough(Number(tab.dataset.wtIndex || 0), true);
     });
   });
+
+  galleryCards.forEach((card) => {
+    card.addEventListener("click", () => {
+      const targetIdx = Number(card.dataset.wtTarget || 0);
+      selectWalkthrough(targetIdx, true);
+      wtContainer?.scrollIntoView({ behavior: "smooth", block: "center" });
+    });
+  });
+
+  if (wtContainer && !reducedMotion) {
+    wtContainer.addEventListener("mouseenter", () => {
+      if (wtTimer) clearInterval(wtTimer);
+      wtTabs.forEach((t) => t.classList.add("paused"));
+    });
+    wtContainer.addEventListener("mouseleave", () => {
+      wtTabs.forEach((t) => t.classList.remove("paused"));
+      restartWalkthroughTimer();
+    });
+    restartWalkthroughTimer();
+  }
 
   // ===== EQUALIZER LED ANIMADO (FIEL AL SPLASH DE AUDIBUUKS) =====
   const eqCanvas = document.getElementById("hero-eq-canvas");
@@ -118,7 +192,6 @@
       7, 5, 9, 8, 4, 5, 2, 0,
       4, 7, 5, 2, 6, 8, 9, 7, 4,
     ];
-    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let phase = 0;
 
     function drawEq() {
@@ -155,8 +228,15 @@
     drawEq();
   }
 
-  // ===== SCROLL REVEAL =====
+  // ===== SCROLL REVEAL CON RETRASO ESCALONADO =====
   const revealNodes = document.querySelectorAll(".reveal, .bench-card");
+  revealNodes.forEach((node) => {
+    const delay = node.dataset.delay;
+    if (delay) {
+      node.style.transitionDelay = `${delay}ms`;
+    }
+  });
+
   if ("IntersectionObserver" in window) {
     const io = new IntersectionObserver(
       (entries) => {
@@ -167,7 +247,7 @@
           }
         });
       },
-      { threshold: 0.14 }
+      { threshold: 0.12 }
     );
     revealNodes.forEach((el) => io.observe(el));
   } else {
@@ -183,7 +263,7 @@
   const abiContainer = document.getElementById("abi-selector");
 
   function formatMb(bytes) {
-    if (!bytes || bytes <= 0) return "~22 MB";
+    if (!bytes || bytes <= 0) return "~22.5 MB";
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   }
 

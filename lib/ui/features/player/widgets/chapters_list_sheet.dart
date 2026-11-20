@@ -32,6 +32,26 @@ class ChaptersListSheet extends StatefulWidget {
 }
 
 class _ChaptersListSheetState extends State<ChaptersListSheet> {
+  Set<int> _downloadedChapterIds = {};
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshDownloadedChaptersFast();
+  }
+
+  Future<void> _refreshDownloadedChaptersFast() async {
+    final ids = await widget.downloadService.getDownloadedChapterIds(
+      book: widget.book,
+      voiceKey: widget.selectedVoiceKey,
+    );
+    if (mounted) {
+      setState(() {
+        _downloadedChapterIds = ids;
+      });
+    }
+  }
+
   String _cleanNotePreview(String raw) {
     return raw
         .replaceAll('**', '')
@@ -377,6 +397,9 @@ class _ChaptersListSheetState extends State<ChaptersListSheet> {
                     builder: (ctx, _) {
                       final p = widget.downloadService.getProgress(widget.book.id, ch.id);
                       final isDownloading = p?.status == DownloadStatus.downloading;
+                      final isError = p?.status == DownloadStatus.error;
+                      final isOffline = p?.status == DownloadStatus.completed ||
+                          (p == null && _downloadedChapterIds.contains(ch.id));
 
                       return Row(
                         mainAxisSize: MainAxisSize.min,
@@ -389,67 +412,92 @@ class _ChaptersListSheetState extends State<ChaptersListSheet> {
                               fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
                             ),
                           ),
-                          const SizedBox(width: 8),
+                          const SizedBox(width: 6),
                           if (isDownloading)
-                            SizedBox(
-                              width: 22,
-                              height: 22,
-                              child: CircularProgressIndicator(
-                                value: p?.progressRatio,
-                                strokeWidth: 2.4,
-                                color: const Color(0xFFF5A623),
+                            InkWell(
+                              borderRadius: BorderRadius.circular(20),
+                              onTap: () {
+                                widget.downloadService.cancelDownload(widget.book.id, ch.id);
+                              },
+                              child: Tooltip(
+                                message: 'Tocá para pausar descarga',
+                                child: SizedBox(
+                                  width: 34,
+                                  height: 34,
+                                  child: Stack(
+                                    alignment: Alignment.center,
+                                    children: [
+                                      SizedBox(
+                                        width: 24,
+                                        height: 24,
+                                        child: CircularProgressIndicator(
+                                          value: p?.progressRatio,
+                                          strokeWidth: 2.5,
+                                          backgroundColor: Colors.white12,
+                                          color: const Color(0xFFF5A623),
+                                        ),
+                                      ),
+                                      Text(
+                                        '${((p?.progressRatio ?? 0.0) * 100).round()}',
+                                        style: const TextStyle(
+                                          color: Color(0xFFF5A623),
+                                          fontSize: 8.5,
+                                          fontWeight: FontWeight.w900,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
                             )
                           else
-                            FutureBuilder<bool>(
-                              future: widget.downloadService.isChapterFullyDownloaded(
-                                bookId: widget.book.id,
-                                chapter: ch,
-                                voiceKey: widget.selectedVoiceKey,
-                                language: widget.book.activeAudioLanguage,
-                              ),
-                              builder: (ctx, snap) {
-                                final isOffline = snap.data == true;
-                                return IconButton(
-                                  visualDensity: VisualDensity.compact,
-                                  icon: Icon(
-                                    isOffline
+                            IconButton(
+                              visualDensity: VisualDensity.compact,
+                              icon: Icon(
+                                isError
+                                    ? Icons.refresh_rounded
+                                    : (isOffline
                                         ? Icons.check_circle_rounded
-                                        : Icons.download_for_offline_outlined,
-                                    size: 20,
-                                    color: isOffline ? Colors.greenAccent : Colors.white38,
-                                  ),
-                                  tooltip: isOffline
+                                        : Icons.download_for_offline_outlined),
+                                size: 20,
+                                color: isError
+                                    ? Colors.orangeAccent
+                                    : (isOffline ? Colors.greenAccent : Colors.white38),
+                              ),
+                              tooltip: isError
+                                  ? 'Reintentar descarga'
+                                  : (isOffline
                                       ? 'Descargado offline (Tocá para borrar)'
-                                      : 'Descargar capítulo',
-                                  onPressed: () async {
-                                    if (isOffline) {
-                                      await widget.downloadService.deleteChapterDownload(
-                                        bookId: widget.book.id,
-                                        chapter: ch,
-                                        voiceKey: widget.selectedVoiceKey,
-                                        language: widget.book.activeAudioLanguage,
-                                      );
-                                      if (context.mounted) {
-                                        ScaffoldMessenger.of(context).showSnackBar(
-                                          SnackBar(
-                                            content: Text('Descarga eliminada: ${ch.title}'),
-                                            backgroundColor: Colors.white12,
-                                            behavior: SnackBarBehavior.floating,
-                                            duration: const Duration(seconds: 1),
-                                          ),
-                                        );
-                                      }
-                                    } else {
-                                      widget.downloadService.downloadChapter(
-                                        bookId: widget.book.id,
-                                        chapter: ch,
-                                        voiceKey: widget.selectedVoiceKey,
-                                        language: widget.book.activeAudioLanguage,
-                                      );
-                                    }
-                                  },
-                                );
+                                      : 'Descargar capítulo'),
+                              onPressed: () async {
+                                if (isOffline && !isError) {
+                                  await widget.downloadService.deleteChapterDownload(
+                                    bookId: widget.book.id,
+                                    chapter: ch,
+                                    voiceKey: widget.selectedVoiceKey,
+                                    language: widget.book.activeAudioLanguage,
+                                  );
+                                  if (mounted) {
+                                    setState(() => _downloadedChapterIds.remove(ch.id));
+                                  }
+                                  if (context.mounted) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      SnackBar(
+                                        content: Text('Descarga eliminada: ${ch.title}'),
+                                        backgroundColor: Colors.white12,
+                                        behavior: SnackBarBehavior.floating,
+                                        duration: const Duration(seconds: 1),
+                                      ),
+                                    );
+                                  }
+                                } else {
+                                  widget.downloadService.downloadChapter(
+                                    bookId: widget.book.id,
+                                    chapter: ch,
+                                    voiceKey: widget.selectedVoiceKey,
+                                    language: widget.book.activeAudioLanguage,
+                                  );
+                                }
                               },
                             ),
                         ],

@@ -38,50 +38,56 @@ class CoverService {
           targetWidth: 24,
           targetHeight: 24,
         );
-        final frame = await codec.getNextFrame();
-        final data = await frame.image.toByteData(format: ui.ImageByteFormat.rawRgba);
-        if (data != null) {
-          int r1 = 0, g1 = 0, b1 = 0, count1 = 0;
-          int r2 = 0, g2 = 0, b2 = 0, count2 = 0;
-          final u8 = data.buffer.asUint8List();
-          final half = u8.length ~/ 2;
-          for (int i = 0; i < u8.length - 4; i += 4) {
-            final r = u8[i];
-            final g = u8[i + 1];
-            final b = u8[i + 2];
-            final lum = (r * 299 + g * 587 + b * 114) ~/ 1000;
-            if (lum > 22 && lum < 235) {
-              if (i < half) {
-                r1 += r;
-                g1 += g;
-                b1 += b;
-                count1++;
-              } else {
-                r2 += r;
-                g2 += g;
-                b2 += b;
-                count2++;
+        ui.FrameInfo? frame;
+        try {
+          frame = await codec.getNextFrame();
+          final data = await frame.image.toByteData(format: ui.ImageByteFormat.rawRgba);
+          if (data != null) {
+            int r1 = 0, g1 = 0, b1 = 0, count1 = 0;
+            int r2 = 0, g2 = 0, b2 = 0, count2 = 0;
+            final u8 = data.buffer.asUint8List();
+            final half = u8.length ~/ 2;
+            for (int i = 0; i < u8.length - 4; i += 4) {
+              final r = u8[i];
+              final g = u8[i + 1];
+              final b = u8[i + 2];
+              final lum = (r * 299 + g * 587 + b * 114) ~/ 1000;
+              if (lum > 22 && lum < 235) {
+                if (i < half) {
+                  r1 += r;
+                  g1 += g;
+                  b1 += b;
+                  count1++;
+                } else {
+                  r2 += r;
+                  g2 += g;
+                  b2 += b;
+                  count2++;
+                }
               }
             }
+            if (count1 > 0 && count2 > 0) {
+              final c1 = HSLColor.fromColor(
+                Color.fromARGB(255, r1 ~/ count1, g1 ~/ count1, b1 ~/ count1),
+              );
+              final c2 = HSLColor.fromColor(
+                Color.fromARGB(255, r2 ~/ count2, g2 ~/ count2, b2 ~/ count2),
+              );
+              return [
+                c1
+                    .withSaturation((c1.saturation * 1.4).clamp(0.42, 0.85))
+                    .withLightness(0.28)
+                    .toColor(),
+                c2
+                    .withSaturation((c2.saturation * 1.4).clamp(0.38, 0.85))
+                    .withLightness(0.18)
+                    .toColor(),
+              ];
+            }
           }
-          if (count1 > 0 && count2 > 0) {
-            final c1 = HSLColor.fromColor(
-              Color.fromARGB(255, r1 ~/ count1, g1 ~/ count1, b1 ~/ count1),
-            );
-            final c2 = HSLColor.fromColor(
-              Color.fromARGB(255, r2 ~/ count2, g2 ~/ count2, b2 ~/ count2),
-            );
-            return [
-              c1
-                  .withSaturation((c1.saturation * 1.4).clamp(0.42, 0.85))
-                  .withLightness(0.28)
-                  .toColor(),
-              c2
-                  .withSaturation((c2.saturation * 1.4).clamp(0.38, 0.85))
-                  .withLightness(0.18)
-                  .toColor(),
-            ];
-          }
+        } finally {
+          frame?.image.dispose();
+          codec.dispose();
         }
       }
     } catch (_) {}
@@ -96,12 +102,12 @@ class CoverService {
   }
 
   static Future<String?> fetchOnlineCoverUrl(String rawTitle) async {
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
     try {
       final query = cleanSearchTitle(rawTitle);
       final uri = Uri.parse(
         'https://itunes.apple.com/search?term=${Uri.encodeComponent(query)}&entity=ebook&limit=1',
       );
-      final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       final req = await client.getUrl(uri);
       final res = await req.close().timeout(const Duration(seconds: 5));
       if (res.statusCode == 200) {
@@ -117,6 +123,8 @@ class CoverService {
       }
     } catch (e) {
       debugPrint('Online cover lookup notice: $e');
+    } finally {
+      client.close(force: true);
     }
     return null;
   }
@@ -196,8 +204,8 @@ class CoverService {
 
     final onlineUrl = await fetchOnlineCoverUrl(bookTitle);
     if (onlineUrl != null) {
+      final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
       try {
-        final client = HttpClient();
         final req = await client.getUrl(Uri.parse(onlineUrl));
         final res = await req.close().timeout(const Duration(seconds: 5));
         if (res.statusCode == 200) {
@@ -207,7 +215,10 @@ class CoverService {
             return {'path': coverFile.path, 'url': onlineUrl};
           }
         }
-      } catch (_) {}
+      } catch (_) {
+      } finally {
+        client.close(force: true);
+      }
     }
 
     return {'path': null, 'url': onlineUrl};

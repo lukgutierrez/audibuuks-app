@@ -12,13 +12,16 @@ import android.graphics.Color
 import android.graphics.pdf.PdfRenderer
 import android.media.AudioAttributes
 import android.media.MediaPlayer
+import android.net.Uri
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.ParcelFileDescriptor
 import android.os.PowerManager
+import android.provider.Settings
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
+import androidx.core.content.FileProvider
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -33,6 +36,7 @@ class MainActivity : AudioServiceActivity() {
     private val DOWNLOAD_NOTIFICATION_ID = 4402
 
     private var lofiPlayer: MediaPlayer? = null
+    private var lofiPrepared: Boolean = false
     private var lofiVolume: Float = 0.25f
     private var currentTrackPath: String? = null
     private var isAllowedToPlay: Boolean = false
@@ -209,11 +213,14 @@ class MainActivity : AudioServiceActivity() {
     private fun setupAndPreparePlayer(path: String, autoStart: Boolean) {
         try {
             currentTrackPath = path
+            lofiPrepared = false
             lofiPlayer?.let {
                 try {
                     if (it.isPlaying) it.stop()
                 } catch (_: Exception) {}
-                it.release()
+                try {
+                    it.release()
+                } catch (_: Exception) {}
             }
             lofiPlayer = null
 
@@ -227,21 +234,134 @@ class MainActivity : AudioServiceActivity() {
             mp.setDataSource(path)
             mp.isLooping = true
             mp.setVolume(lofiVolume, lofiVolume)
-            mp.prepare()
-            lofiPlayer = mp
-
-            if (autoStart && isAllowedToPlay && lofiVolume > 0f) {
-                mp.start()
+            mp.setOnPreparedListener { readyPlayer ->
+                if (readyPlayer !== lofiPlayer) {
+                    try {
+                        readyPlayer.release()
+                    } catch (_: Exception) {}
+                    return@setOnPreparedListener
+                }
+                lofiPrepared = true
+                readyPlayer.setVolume(lofiVolume, lofiVolume)
+                if (autoStart && isAllowedToPlay && lofiVolume > 0f) {
+                    try {
+                        readyPlayer.start()
+                    } catch (_: Exception) {}
+                }
             }
+            mp.setOnErrorListener { _, _, _ ->
+                lofiPrepared = false
+                true
+            }
+            lofiPlayer = mp
+            mp.prepareAsync()
         } catch (e: Exception) {
+            lofiPrepared = false
             e.printStackTrace()
         }
+    }
+
+    private fun readZipEntryBounded(input: java.io.InputStream, maxBytes: Int): ByteArray? {
+        val out = ByteArrayOutputStream()
+        val buf = ByteArray(8192)
+        var total = 0
+        while (true) {
+            val read = input.read(buf)
+            if (read == -1) break
+            total += read
+            if (total > maxBytes) return null
+            out.write(buf, 0, read)
+        }
+        return out.toByteArray()
     }
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
             when (call.method) {
+                "getAppVersionInfo" -> {
+                    try {
+                        val pInfo = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                            packageManager.getPackageInfo(
+                                packageName,
+                                PackageManager.PackageInfoFlags.of(0)
+                            )
+                        } else {
+                            @Suppress("DEPRECATION")
+                            packageManager.getPackageInfo(packageName, 0)
+                        }
+                        val versionName = pInfo.versionName ?: "1.0.0"
+                        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                            pInfo.longVersionCode
+                        } else {
+                            @Suppress("DEPRECATION")
+                            pInfo.versionCode.toLong()
+                        }
+                        result.success(
+                            mapOf(
+                                "versionName" to versionName,
+                                "versionCode" to versionCode.toInt(),
+                                "supportedAbis" to Build.SUPPORTED_ABIS.toList(),
+                                "packageName" to packageName
+                            )
+                        )
+                    } catch (e: Exception) {
+                        result.error("VERSION_ERR", e.message, null)
+                    }
+                }
+                "canRequestPackageInstalls" -> {
+                    val canInstall = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        packageManager.canRequestPackageInstalls()
+                    } else {
+                        true
+                    }
+                    result.success(canInstall)
+                }
+                "openInstallPermissionSettings" -> {
+                    try {
+                        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                            val intent = Intent(
+                                Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,
+                                Uri.parse("package:$packageName")
+                            ).apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                            startActivity(intent)
+                        }
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("SETTINGS_ERR", e.message, null)
+                    }
+                }
+                "installApk" -> {
+                    val path = call.argument<String>("path")
+                    if (path == null) {
+                        result.error("NO_PATH", "APK path is null", null)
+                        return@setMethodCallHandler
+                    }
+                    try {
+                        val updatesDir = File(cacheDir, "updates").canonicalFile
+                        val apkFile = File(path).canonicalFile
+                        if (!apkFile.exists() || !apkFile.path.startsWith(updatesDir.path + File.separator)) {
+                            result.error("INVALID_APK_PATH", "APK fuera del directorio seguro de actualizaciones", null)
+                            return@setMethodCallHandler
+                        }
+                        val apkUri = FileProvider.getUriForFile(
+                            this,
+                            "$packageName.fileprovider",
+                            apkFile
+                        )
+                        val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                            setDataAndType(apkUri, "application/vnd.android.package-archive")
+                            addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        startActivity(installIntent)
+                        result.success(true)
+                    } catch (e: Exception) {
+                        result.error("INSTALL_ERR", e.message, null)
+                    }
+                }
                 "acquireBackgroundLock" -> {
                     acquireBackgroundNetworkLocks()
                     result.success(true)
@@ -361,52 +481,78 @@ class MainActivity : AudioServiceActivity() {
                     }
                     Thread {
                         try {
-                            val zip = ZipFile(File(path))
                             var coverBytes: ByteArray? = null
                             var opfContent: String? = null
                             var opfDir = ""
                             val htmlMap = mutableMapOf<String, String>()
 
-                            val entries = zip.entries()
-                            while (entries.hasMoreElements()) {
-                                val entry = entries.nextElement()
-                                if (entry.isDirectory) continue
-                                val name = entry.name
-                                val lower = name.lowercase()
+                            // Barreras de seguridad contra Zip Bombs y OOM en EPUBs malformados
+                            val maxEntries = 2000
+                            val maxHtmlEntryBytes = 5 * 1024 * 1024
+                            val maxCoverBytes = 15 * 1024 * 1024
+                            val maxTotalExtractedBytes = 80 * 1024 * 1024
+                            var totalExtracted = 0
+                            var entryCount = 0
 
-                                if (lower.endsWith(".opf") && opfContent == null) {
-                                    opfContent = zip.getInputStream(entry).bufferedReader().use { it.readText() }
-                                    val slashIdx = name.lastIndexOf('/')
-                                    opfDir = if (slashIdx != -1) name.substring(0, slashIdx + 1) else ""
-                                } else if (lower.endsWith(".xhtml") || lower.endsWith(".html") || lower.endsWith(".htm")) {
-                                    val text = zip.getInputStream(entry).bufferedReader().use { it.readText() }
-                                    htmlMap[name] = text
-                                } else if ((lower.contains("cover") || lower.contains("portada")) &&
-                                    (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png"))
-                                ) {
-                                    val b = zip.getInputStream(entry).use { it.readBytes() }
-                                    if (b.size > 2000 && (coverBytes == null || b.size > coverBytes!!.size)) {
-                                        coverBytes = b
-                                    }
-                                }
-                            }
-
-                            if (coverBytes == null) {
-                                val imgEntries = zip.entries()
-                                while (imgEntries.hasMoreElements()) {
-                                    val entry = imgEntries.nextElement()
+                            ZipFile(File(path)).use { zip ->
+                                val entries = zip.entries()
+                                while (entries.hasMoreElements()) {
+                                    if (++entryCount > maxEntries) break
+                                    val entry = entries.nextElement()
                                     if (entry.isDirectory) continue
-                                    val lower = entry.name.lowercase()
-                                    if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png")) {
-                                        val b = zip.getInputStream(entry).use { it.readBytes() }
-                                        if (b.size > 4000 && (coverBytes == null || b.size > coverBytes!!.size)) {
+                                    val name = entry.name
+                                    val lower = name.lowercase()
+
+                                    if (lower.endsWith(".opf") && opfContent == null) {
+                                        val opfBytes = zip.getInputStream(entry).use {
+                                            readZipEntryBounded(it, 2 * 1024 * 1024)
+                                        }
+                                        if (opfBytes != null) {
+                                            totalExtracted += opfBytes.size
+                                            opfContent = opfBytes.toString(Charsets.UTF_8)
+                                            val slashIdx = name.lastIndexOf('/')
+                                            opfDir = if (slashIdx != -1) name.substring(0, slashIdx + 1) else ""
+                                        }
+                                    } else if (lower.endsWith(".xhtml") || lower.endsWith(".html") || lower.endsWith(".htm")) {
+                                        if (totalExtracted >= maxTotalExtractedBytes) continue
+                                        val htmlBytes = zip.getInputStream(entry).use {
+                                            readZipEntryBounded(it, maxHtmlEntryBytes)
+                                        }
+                                        if (htmlBytes != null) {
+                                            totalExtracted += htmlBytes.size
+                                            htmlMap[name] = htmlBytes.toString(Charsets.UTF_8)
+                                        }
+                                    } else if ((lower.contains("cover") || lower.contains("portada")) &&
+                                        (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png"))
+                                    ) {
+                                        val b = zip.getInputStream(entry).use {
+                                            readZipEntryBounded(it, maxCoverBytes)
+                                        }
+                                        if (b != null && b.size > 2000 && (coverBytes == null || b.size > coverBytes!!.size)) {
                                             coverBytes = b
                                         }
                                     }
                                 }
-                            }
 
-                            zip.close()
+                                if (coverBytes == null) {
+                                    var imgCount = 0
+                                    val imgEntries = zip.entries()
+                                    while (imgEntries.hasMoreElements()) {
+                                        if (++imgCount > maxEntries) break
+                                        val entry = imgEntries.nextElement()
+                                        if (entry.isDirectory) continue
+                                        val lower = entry.name.lowercase()
+                                        if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png")) {
+                                            val b = zip.getInputStream(entry).use {
+                                                readZipEntryBounded(it, maxCoverBytes)
+                                            }
+                                            if (b != null && b.size > 4000 && (coverBytes == null || b.size > coverBytes!!.size)) {
+                                                coverBytes = b
+                                            }
+                                        }
+                                    }
+                                }
+                            }
 
                             val orderedHtmlList = mutableListOf<String>()
                             if (opfContent != null) {
@@ -474,7 +620,7 @@ class MainActivity : AudioServiceActivity() {
                         val path = call.argument<String>("path") ?: currentTrackPath
                         if (lofiPlayer == null && path != null) {
                             setupAndPreparePlayer(path, true)
-                        } else if (lofiPlayer != null && lofiVolume > 0f) {
+                        } else if (lofiPlayer != null && lofiPrepared && lofiVolume > 0f) {
                             lofiPlayer?.setVolume(lofiVolume, lofiVolume)
                             if (!lofiPlayer!!.isPlaying) {
                                 lofiPlayer?.start()
@@ -488,10 +634,12 @@ class MainActivity : AudioServiceActivity() {
                 "pauseLoFi" -> {
                     try {
                         isAllowedToPlay = false
-                        lofiPlayer?.let {
-                            it.setVolume(0f, 0f)
-                            if (it.isPlaying) {
-                                it.pause()
+                        if (lofiPrepared) {
+                            lofiPlayer?.let {
+                                it.setVolume(0f, 0f)
+                                if (it.isPlaying) {
+                                    it.pause()
+                                }
                             }
                         }
                         result.success(true)
@@ -504,11 +652,13 @@ class MainActivity : AudioServiceActivity() {
                     lofiVolume = vol
                     try {
                         if (vol <= 0f) {
-                            lofiPlayer?.setVolume(0f, 0f)
-                            if (lofiPlayer?.isPlaying == true) {
-                                lofiPlayer?.pause()
+                            if (lofiPrepared) {
+                                lofiPlayer?.setVolume(0f, 0f)
+                                if (lofiPlayer?.isPlaying == true) {
+                                    lofiPlayer?.pause()
+                                }
                             }
-                        } else if (isAllowedToPlay && lofiPlayer != null) {
+                        } else if (isAllowedToPlay && lofiPlayer != null && lofiPrepared) {
                             lofiPlayer?.setVolume(vol, vol)
                             if (!lofiPlayer!!.isPlaying) {
                                 lofiPlayer?.start()
@@ -526,9 +676,15 @@ class MainActivity : AudioServiceActivity() {
 
     override fun onDestroy() {
         isAllowedToPlay = false
+        lofiPrepared = false
         releaseBackgroundNetworkLocks()
         closeCachedPdfRenderer()
-        lofiPlayer?.release()
+        try {
+            pdfRenderExecutor.shutdownNow()
+        } catch (_: Exception) {}
+        try {
+            lofiPlayer?.release()
+        } catch (_: Exception) {}
         lofiPlayer = null
         super.onDestroy()
     }

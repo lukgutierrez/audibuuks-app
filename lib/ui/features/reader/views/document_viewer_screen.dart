@@ -10,6 +10,7 @@ import 'package:syncfusion_flutter_pdf/pdf.dart';
 
 import '../../../../core/utils/text_sanitizer.dart';
 import '../../../../data/repositories/library_repository.dart';
+import '../../../../data/services/audio_player_service.dart';
 import '../../../../data/services/book_translation_service.dart';
 import '../../../../data/services/native_channel_service.dart';
 import '../../../../data/services/tts_synthesis_service.dart';
@@ -323,13 +324,35 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       _syncWithLiveBookProgress();
     });
 
-    _liveSyncTimer = Timer.periodic(const Duration(milliseconds: 450), (_) {
-      _syncWithLiveBookProgress();
+    // Suscripción reactiva directa al servicio global en lugar de polling agresivo cada 450ms
+    audioPlayerService.addListener(_syncWithLiveBookProgress);
+
+    _liveSyncTimer = Timer.periodic(const Duration(milliseconds: 1200), (_) {
+      if (_isPlaying || _isSynthesizingText) {
+        _syncWithLiveBookProgress();
+      }
     });
+  }
+
+  void _safeResumePlayback() {
+    audioPlayerService.userRequestedPause = false;
+    final pState = widget.player.processingState;
+    if (widget.player.audioSource == null ||
+        pState == ProcessingState.idle ||
+        pState == ProcessingState.completed) {
+      widget.onSeekToPosition?.call(_liveAudioChapterIndex, _liveAudioSegmentIndex);
+    } else {
+      unawaited(widget.player.play().catchError((_) {}));
+      if (audioPlayerService.ambientVolume > 0) {
+        NativeChannelService.setLoFiVolume(audioPlayerService.ambientVolume);
+        NativeChannelService.playLoFi();
+      }
+    }
   }
 
   @override
   void dispose() {
+    audioPlayerService.removeListener(_syncWithLiveBookProgress);
     _searchDebounceTimer?.cancel();
     _pageTurnDebounceTimer?.cancel();
     _liveSyncTimer?.cancel();
@@ -459,6 +482,11 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       max<int>(0, widget.book.chapters.length - 1),
     );
     final newSegIdx = widget.book.lastSegmentIndex;
+
+    // Si la síntesis terminó en el servicio global, evitar que el indicador quede atascado
+    if (_isSynthesizingText && !audioPlayerService.isSynthesizing && _livePosition.inMilliseconds > 120) {
+      setState(() => _isSynthesizingText = false);
+    }
 
     // Si ya empezó a sonar con fluidez el segmento tocado, limpiamos el flash inicial y dejamos el subrayado normal
     if (_tappedFlashLineNormRect != null &&
@@ -921,11 +949,14 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
       activeWordRect = _tappedFlashWordNormRect ?? _tappedFlashLineNormRect;
     } else if (paragraphPdfWords.isNotEmpty) {
       final posMs = _livePosition.inMilliseconds;
+      final audioSegs = ch.getSegmentsForLanguage(widget.book.activeAudioLanguage);
+      final spokenSegText = (segIdx >= 0 && segIdx < audioSegs.length) ? audioSegs[segIdx] : null;
       final timings = _ttsService.getWordTimings(
         widget.book.id,
         ch,
         segIdx,
         _selectedVoiceKey,
+        text: spokenSegText,
       );
 
       if (timings != null && timings.isNotEmpty) {
@@ -1505,8 +1536,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
           .whenComplete(() => _isProgrammaticPageTurn = false);
     }
     if (!_isPlaying) {
-      widget.player.play();
-      NativeChannelService.playLoFi();
+      _safeResumePlayback();
     }
   }
 
@@ -1986,10 +2016,6 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                     onTap: () {
                       if (!_autoFollowAudio) {
                         _jumpToAudioPosition();
-                        if (!_isPlaying) {
-                          widget.player.play();
-                          NativeChannelService.playLoFi();
-                        }
                       } else {
                         if (_isPlaying) {
                           widget.player.pause();
@@ -3068,8 +3094,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                                   NativeChannelService.pauseLoFi();
                                   widget.player.pause();
                                 } else {
-                                  widget.player.play();
-                                  NativeChannelService.playLoFi();
+                                  _safeResumePlayback();
                                 }
                               },
                               child: Container(
@@ -3288,6 +3313,7 @@ class _DocumentViewerScreenState extends State<DocumentViewerScreen> {
                       chapter,
                       sIdx,
                       _selectedVoiceKey,
+                      text: text,
                     );
                     if (timings != null && timings.isNotEmpty) {
                       int evIdx = 0;

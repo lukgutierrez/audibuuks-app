@@ -25,12 +25,12 @@ class TTSHandler(BaseHTTPRequestHandler):
             voice = query.get("voice", ["es-MX-JorgeNeural"])[0]
             rate = query.get("rate", ["+0%"])[0]
             
-            if not text:
+            if not text or len(text) > 4000:
                 self.send_response(400)
                 self.end_headers()
                 return
 
-            text_hash = hashlib.md5(f"{text}_{voice}_{rate}".encode("utf-8")).hexdigest()
+            text_hash = hashlib.sha256(f"{text}_{voice}_{rate}".encode("utf-8")).hexdigest()[:32]
             cache_file = os.path.join(AUDIO_CACHE_DIR, f"{text_hash}.mp3")
 
             if not os.path.exists(cache_file) or os.path.getsize(cache_file) < 100:
@@ -44,7 +44,7 @@ class TTSHandler(BaseHTTPRequestHandler):
                     print(f"TTS Error: {e}", file=sys.stderr)
                     self.send_response(500)
                     self.end_headers()
-                    self.wfile.write(str(e).encode("utf-8"))
+                    self.wfile.write(b"Internal TTS synthesis error")
                     return
 
             if os.path.exists(cache_file):
@@ -64,8 +64,9 @@ class TTSHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
 def run_server():
-    server = HTTPServer(("0.0.0.0", 8090), TTSHandler)
-    print("Edge TTS Microservice running on 0.0.0.0:8090")
+    host = os.environ.get("TTS_HOST", "127.0.0.1")
+    server = HTTPServer((host, 8090), TTSHandler)
+    print(f"Edge TTS Microservice running on {host}:8090")
     server.serve_forever()
 
 if __name__ == "__main__":

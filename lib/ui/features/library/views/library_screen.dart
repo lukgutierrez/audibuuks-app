@@ -8,6 +8,7 @@ import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 
 import '../../../../data/repositories/library_repository.dart';
+import '../../../../data/services/app_update_service.dart';
 import '../../../../data/services/audio_player_service.dart';
 import '../../../../data/services/book_translation_service.dart';
 import '../../../../data/services/cloud_book_downloader_service.dart';
@@ -19,6 +20,7 @@ import '../../../../domain/models/book_item.dart';
 import '../../../../domain/models/chapter_item.dart';
 import '../../player/views/player_screen.dart';
 import '../../reader/views/document_viewer_screen.dart';
+import '../widgets/app_update_sheet.dart';
 import '../widgets/book_card.dart';
 import '../widgets/mini_player_bar.dart';
 
@@ -45,6 +47,9 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
   ChapterItem? _currentPlayingChapter;
   BookItem? _currentPlayingBook;
   bool _isPlaying = false;
+  StreamSubscription? _playerStateSub;
+  AppUpdateInfo? _availableUpdate;
+  bool _isCheckingUpdate = false;
 
   @override
   void initState() {
@@ -52,7 +57,7 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
     WidgetsBinding.instance.addObserver(this);
     NativeChannelService.initLoFi();
     audioPlayerService.addListener(_onAudioServiceChanged);
-    globalAudioPlayer.playerStateStream.listen((state) {
+    _playerStateSub = globalAudioPlayer.playerStateStream.listen((state) {
       if (mounted) {
         setState(() {
           _isPlaying = state.playing && !audioPlayerService.userRequestedPause;
@@ -63,6 +68,55 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
       }
     });
     _loadStoredBooksAndLastSession();
+    unawaited(AppUpdateService.cleanupOldApks());
+    Future<void>.delayed(const Duration(milliseconds: 1800), () {
+      if (mounted) _checkForAppUpdates(manual: false);
+    });
+  }
+
+  Future<void> _checkForAppUpdates({required bool manual}) async {
+    if (_isCheckingUpdate) return;
+    if (manual && mounted) {
+      setState(() => _isCheckingUpdate = true);
+    } else {
+      _isCheckingUpdate = true;
+    }
+
+    try {
+      final update = await AppUpdateService.checkForUpdate(ignoreDismissed: manual);
+      if (!mounted) return;
+      if (update != null) {
+        setState(() => _availableUpdate = update);
+        _showUpdateModal(update);
+      } else if (manual) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Ya tenés la última versión de Audibuuks instalada ✅'),
+            backgroundColor: Color(0xFF1F242D),
+            behavior: SnackBarBehavior.floating,
+            duration: Duration(seconds: 2),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() => _isCheckingUpdate = false);
+      } else {
+        _isCheckingUpdate = false;
+      }
+    }
+  }
+
+  void _showUpdateModal(AppUpdateInfo info) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF181A20),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(26)),
+      ),
+      builder: (_) => AppUpdateSheet(updateInfo: info),
+    );
   }
 
   void _onAudioServiceChanged() {
@@ -78,6 +132,7 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
 
   @override
   void dispose() {
+    _playerStateSub?.cancel();
     audioPlayerService.removeListener(_onAudioServiceChanged);
     WidgetsBinding.instance.removeObserver(this);
     super.dispose();
@@ -131,15 +186,19 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           book.coverUrl = url;
           try {
             final coverFile = File('${docDir.path}/cover_${book.id}.jpg');
-            final client = HttpClient();
-            final req = await client.getUrl(Uri.parse(url));
-            final res = await req.close().timeout(const Duration(seconds: 5));
-            if (res.statusCode == 200) {
-              final bytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
-              if (bytes.length > 1000) {
-                await coverFile.writeAsBytes(bytes);
-                book.coverImagePath = coverFile.path;
+            final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
+            try {
+              final req = await client.getUrl(Uri.parse(url));
+              final res = await req.close().timeout(const Duration(seconds: 5));
+              if (res.statusCode == 200) {
+                final bytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+                if (bytes.length > 1000) {
+                  await coverFile.writeAsBytes(bytes);
+                  book.coverImagePath = coverFile.path;
+                }
               }
+            } finally {
+              client.close(force: true);
             }
           } catch (_) {}
           updated = true;
@@ -206,7 +265,8 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
       final booksDir = Directory('${docDir.path}/books');
       if (!await booksDir.exists()) await booksDir.create(recursive: true);
 
-      final permanentFilePath = '${booksDir.path}/${bookId}_$rawFileName';
+      final safeFileName = CloudBookDownloaderService.sanitizeFileName(rawFileName);
+      final permanentFilePath = '${booksDir.path}/${bookId}_$safeFileName';
       await File(permanentFilePath).writeAsBytes(bytes, flush: true);
 
       BookItem newBook;
@@ -659,10 +719,11 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           ),
         ],
       ),
-    );
+    ).whenComplete(urlController.dispose);
   }
 
   Future<void> _downloadAndProcessFromUrl(String url) async {
+    File? downloadedFile;
     try {
       setState(() {
         _isProcessingPdf = true;
@@ -677,7 +738,7 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
         targetName = 'libro_${DateTime.now().millisecondsSinceEpoch}.epub';
       }
 
-      final downloadedFile = await CloudBookDownloaderService.downloadFileWithProgress(
+      downloadedFile = await CloudBookDownloaderService.downloadFileWithProgress(
         rawUrl: url,
         targetFileName: targetName,
         onProgress: (prog) {
@@ -707,6 +768,13 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           ),
         );
       }
+    } finally {
+      // Eliminar copia temporal en cloud_downloads/ tras guardar la copia permanente en books/
+      try {
+        if (downloadedFile != null && await downloadedFile.exists()) {
+          await downloadedFile.delete();
+        }
+      } catch (_) {}
     }
   }
 
@@ -975,6 +1043,54 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           ],
         ),
         actions: [
+          IconButton(
+            tooltip: _availableUpdate != null
+                ? 'Actualización ${_availableUpdate!.displayVersion} disponible'
+                : 'Buscar actualizaciones',
+            onPressed: _isCheckingUpdate
+                ? null
+                : () {
+                    if (_availableUpdate != null) {
+                      _showUpdateModal(_availableUpdate!);
+                    } else {
+                      _checkForAppUpdates(manual: true);
+                    }
+                  },
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                _isCheckingUpdate
+                    ? const SizedBox(
+                        width: 19,
+                        height: 19,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Color(0xFFF5A623),
+                        ),
+                      )
+                    : Icon(
+                        Icons.system_update_rounded,
+                        size: 22,
+                        color: _availableUpdate != null
+                            ? const Color(0xFFF5A623)
+                            : Colors.white60,
+                      ),
+                if (_availableUpdate != null && !_isCheckingUpdate)
+                  Positioned(
+                    right: -2,
+                    top: -2,
+                    child: Container(
+                      width: 8,
+                      height: 8,
+                      decoration: const BoxDecoration(
+                        color: Color(0xFFF5A623),
+                        shape: BoxShape.circle,
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
           Padding(
             padding: const EdgeInsets.only(right: 14),
             child: FilledButton.icon(

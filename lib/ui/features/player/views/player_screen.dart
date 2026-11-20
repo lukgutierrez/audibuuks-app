@@ -109,6 +109,11 @@ class _PlayerScreenState extends State<PlayerScreen>
   StreamSubscription<Duration>? _positionSub;
   StreamSubscription<Duration?>? _durationSub;
 
+  // Watchdog anti-trabas: detecta y recupera automáticamente cualquier segmento congelado o evento completed perdido
+  Timer? _playbackWatchdogTimer;
+  Duration _lastWatchdogPosition = Duration.zero;
+  int _watchdogStallTicks = 0;
+
   @override
   void initState() {
     super.initState();
@@ -123,7 +128,60 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     _loadCoverAmbientPalette();
     _setupAudioStreams();
+    _startPlaybackWatchdog();
     _initPreferencesAndStartPlayback();
+  }
+
+  void _startPlaybackWatchdog() {
+    _playbackWatchdogTimer?.cancel();
+    _playbackWatchdogTimer = Timer.periodic(const Duration(seconds: 3), (_) {
+      if (!mounted || !audioPlayerService.isPlayerScreenMounted || _userRequestedPause) {
+        _watchdogStallTicks = 0;
+        return;
+      }
+
+      final pState = widget.player.processingState;
+
+      // Caso 1: El segmento terminó pero el evento completed no disparó el avance
+      if (pState == ProcessingState.completed && !_isSynthesizing) {
+        _isHandlingCompletion = false;
+        _watchdogStallTicks = 0;
+        _onSegmentCompleted();
+        return;
+      }
+
+      // Caso 2: _isHandlingCompletion quedó atascado sin síntesis activa
+      if (_isHandlingCompletion && !_isSynthesizing) {
+        _watchdogStallTicks++;
+        if (_watchdogStallTicks >= 2) {
+          _isHandlingCompletion = false;
+          _watchdogStallTicks = 0;
+          if (pState == ProcessingState.completed) {
+            _onSegmentCompleted();
+          }
+        }
+        return;
+      }
+
+      // Caso 3: El reproductor dice estar reproduciendo pero el tiempo no avanzó durante 6s-9s reales
+      if (_isPlaying && !_isSynthesizing && pState == ProcessingState.ready) {
+        final curPos = widget.player.position;
+        if (curPos == _lastWatchdogPosition) {
+          _watchdogStallTicks++;
+          if (_watchdogStallTicks == 2) {
+            unawaited(widget.player.play().catchError((_) {}));
+          } else if (_watchdogStallTicks >= 3) {
+            _watchdogStallTicks = 0;
+            _playSegmentAtIndex(_currentSegmentIndex, ++_synthesisGeneration, curPos.inMilliseconds);
+          }
+        } else {
+          _lastWatchdogPosition = curPos;
+          _watchdogStallTicks = 0;
+        }
+      } else {
+        _watchdogStallTicks = 0;
+      }
+    });
   }
 
   /// Solo activa el ticker de animación ambiental cuando el usuario está en Modo Portada (_viewMode == 0)
@@ -192,6 +250,7 @@ class _PlayerScreenState extends State<PlayerScreen>
       ambientTrackId: _selectedAmbientTrackId,
       pausedByUser: _userRequestedPause,
       bufferedSegment: _bufferedUpToSegment,
+      synthesizing: _isSynthesizing,
     );
   }
 
@@ -292,6 +351,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
   @override
   void dispose() {
+    _playbackWatchdogTimer?.cancel();
     audioPlayerService.removeListener(_onGlobalAudioServiceChanged);
     _syncToGlobalService();
     audioPlayerService.setPlayerScreenMounted(false);
@@ -310,8 +370,9 @@ class _PlayerScreenState extends State<PlayerScreen>
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.paused || state == AppLifecycleState.detached) {
       // Al apagar la pantalla o minimizar con el reproductor abierto:
-      // 1. Apagar el ticker gráfico para no calentar el teléfono.
-      // 2. Ceder el control al servicio nativo de fondo con WakeLock para que en el colectivo no se corte entre párrafos.
+      // 1. Apagar el ticker gráfico y el watchdog de primer plano para no calentar el teléfono.
+      // 2. Ceder el control al servicio nativo de fondo con WakeLock para que no se corte entre párrafos.
+      _playbackWatchdogTimer?.cancel();
       _ambientAnimController.stop();
       _saveExactPositionNow();
       _syncToGlobalService();
@@ -322,6 +383,10 @@ class _PlayerScreenState extends State<PlayerScreen>
     } else if (state == AppLifecycleState.resumed) {
       // Al encender la pantalla nuevamente, recuperar el estado actualizado desde el servicio de fondo
       audioPlayerService.setPlayerScreenMounted(true);
+      final bool bgWasSynthesizing = audioPlayerService.consumeWasSynthesizingBeforeForeground();
+      _isHandlingCompletion = false;
+      _watchdogStallTicks = 0;
+
       if (audioPlayerService.currentBook?.id == widget.book.id &&
           audioPlayerService.currentChapter != null) {
         final activeCh = audioPlayerService.currentChapter!;
@@ -341,11 +406,26 @@ class _PlayerScreenState extends State<PlayerScreen>
           _duration = widget.player.duration ?? Duration.zero;
           _isPlaying = widget.player.playing && !audioPlayerService.userRequestedPause;
           _userRequestedPause = audioPlayerService.userRequestedPause;
-          _isSynthesizing = audioPlayerService.isSynthesizing;
+          _isSynthesizing = false;
         });
         _ensureCurrentSegmentTokensCached();
         _scrollToCurrentSegment(safeSeg);
+
+        // Auto-recuperación instantánea al volver a la pantalla: jamás queda trabado esperando recarga
+        if (!_userRequestedPause) {
+          final pState = widget.player.processingState;
+          if (pState == ProcessingState.completed) {
+            _onSegmentCompleted();
+          } else if (bgWasSynthesizing ||
+              (!widget.player.playing &&
+                  (pState == ProcessingState.idle || widget.player.audioSource == null))) {
+            _playSegmentAtIndex(safeSeg, ++_synthesisGeneration, _position.inMilliseconds);
+          } else {
+            _startSequentialPrefetch(_currentChapter, safeSeg + 1, _selectedVoiceKey, _synthesisGeneration);
+          }
+        }
       }
+      _startPlaybackWatchdog();
       _syncAmbientAnimationTicker();
     }
   }
@@ -474,10 +554,23 @@ class _PlayerScreenState extends State<PlayerScreen>
       } catch (_) {}
     }
 
-    if (!mounted || gen != _synthesisGeneration) return;
+    if (!mounted || gen != _synthesisGeneration) {
+      if (gen == _synthesisGeneration) _isHandlingCompletion = false;
+      return;
+    }
 
     // Usa los segmentos correspondientes al idioma de audio activo (Español o Inglés)
     final segs = playableChapter.getSegmentsForLanguage(widget.book.activeAudioLanguage);
+    if (segs.isEmpty) {
+      _isHandlingCompletion = false;
+      if (mounted) {
+        setState(() {
+          _isSynthesizing = false;
+          _statusMessage = '';
+        });
+      }
+      return;
+    }
     final int safeSeg = startSegment.clamp(0, max<int>(0, segs.length - 1)).toInt();
 
     setState(() {
@@ -520,174 +613,216 @@ class _PlayerScreenState extends State<PlayerScreen>
     int seekToMs = 0,
     double initialWordRatio = 0.0,
   ]) async {
-    if (!mounted) return;
-    if (index < 0 || index >= _segments.length) return;
+    if (!mounted) {
+      _isHandlingCompletion = false;
+      return;
+    }
+    if (index < 0 || index >= _segments.length) {
+      _isHandlingCompletion = false;
+      return;
+    }
 
     final int gen = ++_synthesisGeneration;
     ++_prefetchGeneration;
     _isHandlingCompletion = true;
+    _watchdogStallTicks = 0;
     final voiceKey = _selectedVoiceKey;
     final chapter = _currentChapter;
 
     // Pausar inmediatamente la música ambiental para que jamás suene sola mientras carga un segmento
     NativeChannelService.pauseLoFi();
 
-    final currentSegText = _segments[index];
-    final bool alreadyCached = await _ttsService.isSegmentCached(
-      bookId: widget.book.id,
-      chapter: chapter,
-      segIdx: index,
-      voiceKey: voiceKey,
-      text: currentSegText,
-    );
-    if (gen != _synthesisGeneration || !mounted) return;
-
-    setState(() {
-      _currentSegmentIndex = index;
-      _bufferedUpToSegment = max(_bufferedUpToSegment, index + (alreadyCached ? 1 : 0));
-      widget.book.lastChapterIndex = widget.book.chapters
-          .indexWhere((c) => c.id == chapter.id)
-          .clamp(0, widget.book.chapters.length - 1);
-      widget.book.lastSegmentIndex = index;
-      if (!alreadyCached) {
-        _isSynthesizing = true;
-      } else {
-        _isSynthesizing = false;
-        _statusMessage = '';
-      }
-    });
-    _ensureCurrentSegmentTokensCached();
-    _syncToGlobalService();
-    widget.onProgressUpdated?.call(_currentChapter, index, _segments.length, seekToMs);
-    _scrollToCurrentSegment(index);
-
-    // 1. Fase de Red / Caché con reintento automático si se corta el 4G/LTE en el colectivo
-    File? audioFile;
-    int networkAttempt = 0;
-    while (mounted && gen == _synthesisGeneration && !_userRequestedPause) {
-      try {
-        audioFile = await _ttsService.synthesizeSegment(
-          bookId: widget.book.id,
-          chapter: chapter,
-          segIdx: index,
-          text: currentSegText,
-          voiceKey: voiceKey,
-        );
-        break;
-      } catch (e) {
-        networkAttempt++;
-        if (!mounted || gen != _synthesisGeneration || _userRequestedPause) return;
-
-        setState(() {
-          _isSynthesizing = true;
-          _statusMessage =
-              'Señal inestable • Reconectando automáticamente (intento $networkAttempt)...';
-        });
-
-        await Future<void>.delayed(const Duration(milliseconds: 1800));
-      }
-    }
-
-    if (audioFile == null || gen != _synthesisGeneration || !mounted || _userRequestedPause) {
-      return;
-    }
-
-    // 2. Fase de Reproductor Local con reintento automático ante colisiones de cambio de sección
-    Uri? artUri;
     try {
-      if (widget.book.coverImagePath != null &&
-          await File(widget.book.coverImagePath!).exists()) {
-        artUri = Uri.file(widget.book.coverImagePath!);
-      } else if (widget.book.coverUrl != null) {
-        artUri = Uri.parse(widget.book.coverUrl!);
-      }
-    } catch (_) {}
+      final currentSegText = _segments[index];
+      final bool alreadyCached = await _ttsService.isSegmentCached(
+        bookId: widget.book.id,
+        chapter: chapter,
+        segIdx: index,
+        voiceKey: voiceKey,
+        text: currentSegText,
+      );
+      if (gen != _synthesisGeneration || !mounted) return;
 
-    for (int playerAttempt = 0; playerAttempt < 4; playerAttempt++) {
-      if (gen != _synthesisGeneration || !mounted || _userRequestedPause) return;
-      try {
-        await widget.player.setAudioSource(
-          AudioSource.uri(
-            Uri.file(audioFile.path),
-            tag: MediaItem(
-              id: '${widget.book.id}_${chapter.id}_$index',
-              album: widget.book.title,
-              title: '${chapter.title} (${index + 1}/${_segments.length})',
-              artist: widget.book.author,
-              artUri: artUri,
-            ),
-          ),
-        );
-
-        int effectiveSeekMs = seekToMs;
-        if (effectiveSeekMs <= 500 && initialWordRatio > 0.05) {
-          final timings = _ttsService.getWordTimings(
-            widget.book.id,
-            chapter,
-            index,
-            voiceKey,
-          );
-          if (timings != null && timings.isNotEmpty) {
-            final tIdx = (initialWordRatio * timings.length)
-                .floor()
-                .clamp(0, timings.length - 1);
-            effectiveSeekMs = max(0, timings[tIdx].startMs - 80);
-          } else if (widget.player.duration != null) {
-            effectiveSeekMs =
-                (widget.player.duration!.inMilliseconds * initialWordRatio).round();
-          }
-        }
-
-        if (effectiveSeekMs > 250) {
-          await widget.player.seek(Duration(milliseconds: effectiveSeekMs));
-        }
-
-        await widget.player.setSpeed(_playbackSpeed);
-        try {
-          await widget.player.setPitch(1.0);
-        } catch (_) {}
-
-        if (!mounted || gen != _synthesisGeneration) return;
-        _isHandlingCompletion = false;
-        setState(() {
+      setState(() {
+        _currentSegmentIndex = index;
+        _bufferedUpToSegment = max(_bufferedUpToSegment, index + (alreadyCached ? 1 : 0));
+        widget.book.lastChapterIndex = widget.book.chapters
+            .indexWhere((c) => c.id == chapter.id)
+            .clamp(0, max<int>(0, widget.book.chapters.length - 1));
+        widget.book.lastSegmentIndex = index;
+        if (!alreadyCached) {
+          _isSynthesizing = true;
+        } else {
           _isSynthesizing = false;
           _statusMessage = '';
-          _bufferedUpToSegment = max(_bufferedUpToSegment, index + 1);
+        }
+      });
+      _ensureCurrentSegmentTokensCached();
+      _syncToGlobalService();
+      widget.onProgressUpdated?.call(_currentChapter, index, _segments.length, seekToMs);
+      _scrollToCurrentSegment(index);
+
+      // 1. Fase de Red / Caché con backoff exponencial acotado (sin trabar ni drenar batería)
+      File? audioFile;
+      const retryBackoffMs = [900, 1800, 3000, 4500, 6500];
+      for (int attempt = 0; attempt <= retryBackoffMs.length; attempt++) {
+        if (!mounted || gen != _synthesisGeneration || _userRequestedPause) return;
+        try {
+          audioFile = await _ttsService.synthesizeSegment(
+            bookId: widget.book.id,
+            chapter: chapter,
+            segIdx: index,
+            text: currentSegText,
+            voiceKey: voiceKey,
+          );
+          break;
+        } catch (_) {
+          if (!mounted || gen != _synthesisGeneration || _userRequestedPause) return;
+          if (attempt < retryBackoffMs.length) {
+            setState(() {
+              _isSynthesizing = true;
+              _statusMessage =
+                  'Señal inestable • Reconectando (${attempt + 1}/${retryBackoffMs.length})...';
+            });
+            await Future<void>.delayed(Duration(milliseconds: retryBackoffMs[attempt]));
+          }
+        }
+      }
+
+      if (gen != _synthesisGeneration || !mounted || _userRequestedPause) return;
+
+      if (audioFile == null) {
+        NativeChannelService.releaseBackgroundLock();
+        setState(() {
+          _isSynthesizing = false;
+          _isPlaying = false;
+          _statusMessage = 'Sin conexión • Tocá Play para reintentar este párrafo';
         });
         _syncToGlobalService();
-
-        if (_userRequestedPause) return;
-
-        unawaited(widget.player.play().catchError((_) {}));
-
-        if (_ambientVolume > 0 && !_userRequestedPause) {
-          NativeChannelService.setLoFiVolume(_ambientVolume);
-          NativeChannelService.playLoFi();
-        }
         _syncAmbientAnimationTicker();
+        return;
+      }
 
-        // 3. Pre-descarga continua de TODA la sección actual en segundo plano (estilo YouTube)
-        _startSequentialPrefetch(chapter, index + 1, voiceKey, gen);
-        break;
-      } catch (_) {
-        if (playerAttempt == 3) {
-          if (mounted && gen == _synthesisGeneration) {
-            _isHandlingCompletion = false;
-            setState(() {
-              _isSynthesizing = false;
-              _statusMessage = '';
-            });
-          }
-        } else {
-          await Future<void>.delayed(const Duration(milliseconds: 140));
+      // 2. Fase de Reproductor Local con auto-reparación si un MP3 cacheado estaba corrupto
+      Uri? artUri;
+      try {
+        if (widget.book.coverImagePath != null &&
+            await File(widget.book.coverImagePath!).exists()) {
+          artUri = Uri.file(widget.book.coverImagePath!);
+        } else if (widget.book.coverUrl != null) {
+          artUri = Uri.parse(widget.book.coverUrl!);
         }
+      } catch (_) {}
+
+      File currentFile = audioFile;
+      for (int playerAttempt = 0; playerAttempt < 3; playerAttempt++) {
+        if (gen != _synthesisGeneration || !mounted || _userRequestedPause) return;
+        try {
+          await widget.player.setAudioSource(
+            AudioSource.uri(
+              Uri.file(currentFile.path),
+              tag: MediaItem(
+                id: '${widget.book.id}_${chapter.id}_$index',
+                album: widget.book.title,
+                title: '${chapter.title} (${index + 1}/${_segments.length})',
+                artist: widget.book.author,
+                artUri: artUri,
+              ),
+            ),
+          );
+
+          int effectiveSeekMs = seekToMs;
+          if (effectiveSeekMs <= 500 && initialWordRatio > 0.05) {
+            final timings = _ttsService.getWordTimings(
+              widget.book.id,
+              chapter,
+              index,
+              voiceKey,
+              text: currentSegText,
+            );
+            if (timings != null && timings.isNotEmpty) {
+              final tIdx = (initialWordRatio * timings.length)
+                  .floor()
+                  .clamp(0, timings.length - 1);
+              effectiveSeekMs = max(0, timings[tIdx].startMs - 80);
+            } else if (widget.player.duration != null) {
+              effectiveSeekMs =
+                  (widget.player.duration!.inMilliseconds * initialWordRatio).round();
+            }
+          }
+
+          if (effectiveSeekMs > 250) {
+            await widget.player.seek(Duration(milliseconds: effectiveSeekMs));
+          }
+
+          await widget.player.setSpeed(_playbackSpeed);
+          try {
+            await widget.player.setPitch(1.0);
+          } catch (_) {}
+
+          if (!mounted || gen != _synthesisGeneration) return;
+          _isHandlingCompletion = false;
+          setState(() {
+            _isSynthesizing = false;
+            _statusMessage = '';
+            _bufferedUpToSegment = max(_bufferedUpToSegment, index + 1);
+          });
+          _syncToGlobalService();
+
+          if (_userRequestedPause) return;
+
+          unawaited(widget.player.play().catchError((_) {}));
+
+          if (_ambientVolume > 0 && !_userRequestedPause) {
+            NativeChannelService.setLoFiVolume(_ambientVolume);
+            NativeChannelService.playLoFi();
+          }
+          _syncAmbientAnimationTicker();
+
+          // 3. Pre-descarga paralela de TODA la sección actual en segundo plano (estilo YouTube, 3x más rápida)
+          _startSequentialPrefetch(chapter, index + 1, voiceKey, gen);
+          break;
+        } catch (_) {
+          // Si el archivo MP3 local estaba dañado, eliminarlo y resintetizar automáticamente
+          if (playerAttempt == 0) {
+            await _ttsService.invalidateCorruptedSegment(
+              bookId: widget.book.id,
+              chapter: chapter,
+              segIdx: index,
+              voiceKey: voiceKey,
+              text: currentSegText,
+            );
+            try {
+              currentFile = await _ttsService.synthesizeSegment(
+                bookId: widget.book.id,
+                chapter: chapter,
+                segIdx: index,
+                text: currentSegText,
+                voiceKey: voiceKey,
+              );
+            } catch (_) {}
+          } else if (playerAttempt == 2) {
+            if (mounted && gen == _synthesisGeneration) {
+              setState(() {
+                _isSynthesizing = false;
+                _isPlaying = false;
+                _statusMessage = 'No se pudo cargar este audio • Tocá Play para reintentar';
+              });
+            }
+          } else {
+            await Future<void>.delayed(const Duration(milliseconds: 200));
+          }
+        }
+      }
+    } finally {
+      if (gen == _synthesisGeneration) {
+        _isHandlingCompletion = false;
       }
     }
   }
 
-  /// Pre-descarga continua estilo YouTube:
-  /// Va guardando en caché todos los párrafos restantes de la sección actual y actualiza en vivo
-  /// la barra secundaria de buffer (`_bufferedUpToSegment`) delante del punto de reproducción.
+  /// Pre-descarga paralela (3 workers) estilo YouTube:
+  /// Prioriza primero el párrafo siguiente inmediato y luego llena toda la sección 3x más rápido.
   Future<void> _startSequentialPrefetch(
     ChapterItem chapter,
     int startIdx,
@@ -696,97 +831,145 @@ class _PlayerScreenState extends State<PlayerScreen>
   ) async {
     final prefetchId = ++_prefetchGeneration;
     final segs = chapter.getSegmentsForLanguage(widget.book.activeAudioLanguage);
+    if (startIdx >= segs.length) return;
 
-    // 1. Escanear rápido cuántos segmentos consecutivos ya estaban en disco
-    int contiguousCached = startIdx;
+    bool shouldAbort() =>
+        prefetchId != _prefetchGeneration ||
+        _currentChapter.id != chapter.id ||
+        !mounted ||
+        _userRequestedPause;
+
+    // 1. Escaneo rápido O(1) en disco para detectar qué párrafos ya están cacheados
+    final cachedKeys = await _ttsService.getCachedKeysForBook(widget.book.id);
+    if (shouldAbort()) return;
+
+    final Set<int> completed = {};
+    final List<int> missing = [];
     for (int i = startIdx; i < segs.length; i++) {
-      final cached = await _ttsService.isSegmentCached(
-        bookId: widget.book.id,
-        chapter: chapter,
-        segIdx: i,
-        voiceKey: voiceKey,
-        text: segs[i],
-      );
-      if (cached) {
-        contiguousCached = i + 1;
+      final segKey = _ttsService.segmentKeyId(widget.book.id, chapter, i, voiceKey, text: segs[i]);
+      if (cachedKeys.contains(segKey)) {
+        completed.add(i);
       } else {
-        break;
+        missing.add(i);
       }
     }
-    if (mounted &&
-        prefetchId == _prefetchGeneration &&
-        _currentChapter.id == chapter.id &&
-        contiguousCached > _bufferedUpToSegment) {
+
+    int contiguous = startIdx;
+    while (completed.contains(contiguous) && contiguous < segs.length) {
+      contiguous++;
+    }
+    if (contiguous > _bufferedUpToSegment && !shouldAbort()) {
       setState(() {
-        _bufferedUpToSegment = contiguousCached;
+        _bufferedUpToSegment = contiguous;
       });
       _syncToGlobalService();
     }
 
-    // 2. Pre-cargar toda la sección actual de principio a fin con reintento ante microcortes de 4G
-    for (int i = contiguousCached; i < segs.length; i++) {
-      if (prefetchId != _prefetchGeneration ||
-          _currentChapter.id != chapter.id ||
-          !mounted ||
-          _userRequestedPause) {
-        return;
-      }
-      bool ok = false;
+    // 2. Prioridad absoluta al párrafo inmediatamente siguiente (0ms de espera al terminar el actual)
+    if (missing.isNotEmpty && missing.first == startIdx) {
+      final firstIdx = missing.removeAt(0);
       for (int retry = 0; retry < 3; retry++) {
-        if (prefetchId != _prefetchGeneration ||
-            _currentChapter.id != chapter.id ||
-            !mounted ||
-            _userRequestedPause) {
-          return;
-        }
+        if (shouldAbort()) return;
         try {
           await _ttsService.synthesizeSegment(
             bookId: widget.book.id,
             chapter: chapter,
-            segIdx: i,
-            text: segs[i],
+            segIdx: firstIdx,
+            text: segs[firstIdx],
             voiceKey: voiceKey,
           );
-          ok = true;
+          completed.add(firstIdx);
+          while (completed.contains(contiguous) && contiguous < segs.length) {
+            contiguous++;
+          }
+          if (contiguous > _bufferedUpToSegment && !shouldAbort()) {
+            setState(() {
+              _bufferedUpToSegment = contiguous;
+            });
+            _syncToGlobalService();
+          }
           break;
         } catch (_) {
-          await Future<void>.delayed(const Duration(milliseconds: 1600));
+          await Future<void>.delayed(Duration(milliseconds: 800 * (retry + 1)));
+        }
+      }
+    }
+
+    // 3. Pool paralelo de 3 workers para llenar el resto de la sección a máxima velocidad
+    if (missing.isNotEmpty && !shouldAbort()) {
+      int cursor = 0;
+      DateTime lastUiTick = DateTime.now();
+
+      Future<void> worker() async {
+        while (!shouldAbort()) {
+          if (cursor >= missing.length) return;
+          final idx = missing[cursor++];
+          for (int retry = 0; retry < 3; retry++) {
+            if (shouldAbort()) return;
+            try {
+              await _ttsService.synthesizeSegment(
+                bookId: widget.book.id,
+                chapter: chapter,
+                segIdx: idx,
+                text: segs[idx],
+                voiceKey: voiceKey,
+              );
+              completed.add(idx);
+              while (completed.contains(contiguous) && contiguous < segs.length) {
+                contiguous++;
+              }
+              if (contiguous > _bufferedUpToSegment && !shouldAbort()) {
+                final now = DateTime.now();
+                if (now.difference(lastUiTick).inMilliseconds >= 220 ||
+                    contiguous >= segs.length) {
+                  lastUiTick = now;
+                  setState(() {
+                    _bufferedUpToSegment = contiguous;
+                  });
+                  _syncToGlobalService();
+                } else {
+                  _bufferedUpToSegment = contiguous;
+                }
+              }
+              break;
+            } catch (_) {
+              await Future<void>.delayed(Duration(milliseconds: 900 * (retry + 1)));
+            }
+          }
         }
       }
 
-      if (ok &&
-          mounted &&
-          prefetchId == _prefetchGeneration &&
-          _currentChapter.id == chapter.id) {
+      await Future.wait(List.generate(min(3, missing.length), (_) => worker()));
+      if (!shouldAbort() && mounted) {
         setState(() {
-          _bufferedUpToSegment = max(_bufferedUpToSegment, i + 1);
+          _bufferedUpToSegment = max(_bufferedUpToSegment, contiguous);
         });
         _syncToGlobalService();
       }
     }
 
-    // 3. Una vez que la sección actual está 100% pre-cargada, pre-cachear los primeros 4 párrafos del próximo capítulo
+    if (shouldAbort()) return;
+
+    // 4. Una vez que la sección actual está 100% pre-cargada, pre-cachear en paralelo los primeros 4 párrafos del próximo capítulo
     final chIdx = widget.book.chapters.indexWhere((c) => c.id == chapter.id);
     if (chIdx != -1 && chIdx + 1 < widget.book.chapters.length) {
       final nextCh = widget.book.chapters[chIdx + 1];
       final nextSegs = nextCh.getSegmentsForLanguage(widget.book.activeAudioLanguage);
-      for (int k = 0; k < min(4, nextSegs.length); k++) {
-        if (prefetchId != _prefetchGeneration ||
-            _currentChapter.id != chapter.id ||
-            !mounted ||
-            _userRequestedPause) {
-          return;
-        }
-        try {
-          await _ttsService.synthesizeSegment(
-            bookId: widget.book.id,
-            chapter: nextCh,
-            segIdx: k,
-            text: nextSegs[k],
-            voiceKey: voiceKey,
-          );
-        } catch (_) {}
-      }
+      final int lookahead = min(4, nextSegs.length);
+      await Future.wait(
+        List.generate(lookahead, (k) async {
+          if (shouldAbort()) return;
+          try {
+            await _ttsService.synthesizeSegment(
+              bookId: widget.book.id,
+              chapter: nextCh,
+              segIdx: k,
+              text: nextSegs[k],
+              voiceKey: voiceKey,
+            );
+          } catch (_) {}
+        }),
+      );
     }
   }
 
@@ -885,8 +1068,10 @@ class _PlayerScreenState extends State<PlayerScreen>
       if (targetSeconds <= acc + chSec || ch == widget.book.chapters.last) {
         final localSec = (targetSeconds - acc).clamp(0.0, chSec.toDouble());
         final localRatio = (localSec / max(1, chSec)).clamp(0.0, 0.999);
-        final segs = ch.segments;
-        final targetSeg = (localRatio * segs.length).floor();
+        final segs = ch.getSegmentsForLanguage(widget.book.activeAudioLanguage);
+        final targetSeg = segs.isEmpty
+            ? 0
+            : (localRatio * segs.length).floor().clamp(0, segs.length - 1);
         if (ch.id == _currentChapter.id) {
           _playSegmentAtIndex(targetSeg, _synthesisGeneration);
         } else {
@@ -1159,6 +1344,7 @@ class _PlayerScreenState extends State<PlayerScreen>
   void _togglePlayPause() {
     if (_isSynthesizing) {
       _userRequestedPause = true;
+      _isHandlingCompletion = false;
       _synthesisGeneration++;
       _prefetchGeneration++;
       NativeChannelService.pauseLoFi();
@@ -1176,6 +1362,7 @@ class _PlayerScreenState extends State<PlayerScreen>
 
     if (_isPlaying) {
       _userRequestedPause = true;
+      _isHandlingCompletion = false;
       NativeChannelService.pauseLoFi();
       widget.player.pause();
       setState(() {
@@ -1186,20 +1373,44 @@ class _PlayerScreenState extends State<PlayerScreen>
       _saveExactPositionNow();
     } else {
       _userRequestedPause = false;
+      _isHandlingCompletion = false;
+      _watchdogStallTicks = 0;
       widget.player.setVolume(1.0);
+      setState(() => _statusMessage = '');
       _syncToGlobalService();
-      if (widget.player.audioSource == null) {
+
+      final pState = widget.player.processingState;
+      if (widget.player.audioSource == null || pState == ProcessingState.idle) {
         _playSegmentAtIndex(
           _currentSegmentIndex,
           ++_synthesisGeneration,
           _position.inMilliseconds,
         );
+      } else if (pState == ProcessingState.completed) {
+        // En just_audio, llamar play() sobre un audio ya en estado completed no hace nada;
+        // avanzamos al siguiente párrafo (o reiniciamos el último si es el final del libro).
+        if (_currentSegmentIndex + 1 < _segments.length) {
+          _onSegmentCompleted();
+        } else {
+          final chIdx = widget.book.chapters.indexWhere((c) => c.id == _currentChapter.id);
+          if (chIdx != -1 && chIdx + 1 < widget.book.chapters.length) {
+            _startChapterPlayback(widget.book.chapters[chIdx + 1], startSegment: 0);
+          } else {
+            _playSegmentAtIndex(_currentSegmentIndex, ++_synthesisGeneration, 0);
+          }
+        }
       } else {
-        widget.player.play();
+        unawaited(widget.player.play().catchError((_) {}));
         if (_ambientVolume > 0) {
           NativeChannelService.setLoFiVolume(_ambientVolume);
           NativeChannelService.playLoFi();
         }
+        _startSequentialPrefetch(
+          _currentChapter,
+          _currentSegmentIndex + 1,
+          _selectedVoiceKey,
+          _synthesisGeneration,
+        );
       }
     }
   }
@@ -1367,10 +1578,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           onSeekToPosition: (chIdx, segIdx) {
             if (chIdx < 0 || chIdx >= widget.book.chapters.length) return;
             final targetCh = widget.book.chapters[chIdx];
+            final targetSegs = targetCh.getSegmentsForLanguage(widget.book.activeAudioLanguage);
             widget.book.lastChapterIndex = chIdx;
             widget.book.lastSegmentIndex = segIdx;
-            widget.book.totalSegmentsInLastChapter = max(1, targetCh.segments.length);
+            widget.book.totalSegmentsInLastChapter = max(1, targetSegs.length);
             _userRequestedPause = false;
+            _isHandlingCompletion = false;
             if (targetCh.id == _currentChapter.id) {
               _playSegmentAtIndex(segIdx, ++_synthesisGeneration);
             } else {
@@ -1380,10 +1593,12 @@ class _PlayerScreenState extends State<PlayerScreen>
           onSeekToExactRatio: (chIdx, segIdx, wordRatio) {
             if (chIdx < 0 || chIdx >= widget.book.chapters.length) return;
             final targetCh = widget.book.chapters[chIdx];
+            final targetSegs = targetCh.getSegmentsForLanguage(widget.book.activeAudioLanguage);
             widget.book.lastChapterIndex = chIdx;
             widget.book.lastSegmentIndex = segIdx;
-            widget.book.totalSegmentsInLastChapter = max(1, targetCh.segments.length);
+            widget.book.totalSegmentsInLastChapter = max(1, targetSegs.length);
             _userRequestedPause = false;
+            _isHandlingCompletion = false;
             if (targetCh.id == _currentChapter.id) {
               _playSegmentAtIndex(segIdx, ++_synthesisGeneration, 0, wordRatio);
             } else {
@@ -2020,6 +2235,52 @@ class _PlayerScreenState extends State<PlayerScreen>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (_statusMessage.isNotEmpty) ...[
+              Container(
+                margin: const EdgeInsets.only(bottom: 10),
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                decoration: BoxDecoration(
+                  color: const Color(0xFF1E1F26).withValues(alpha: 0.96),
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(
+                    color: const Color(0xFFF5A623).withValues(alpha: 0.45),
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_isSynthesizing)
+                      const SizedBox(
+                        width: 12,
+                        height: 12,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: Color(0xFFF5A623),
+                        ),
+                      )
+                    else
+                      const Icon(
+                        Icons.info_outline_rounded,
+                        size: 14,
+                        color: Color(0xFFF5A623),
+                      ),
+                    const SizedBox(width: 8),
+                    Flexible(
+                      child: Text(
+                        _statusMessage,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 11.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             Stack(
               alignment: Alignment.center,
               children: [
@@ -2190,8 +2451,13 @@ class _PlayerScreenState extends State<PlayerScreen>
                 IconButton(
                   icon: const Icon(Icons.replay_10_rounded, size: 30, color: Colors.white),
                   onPressed: () {
-                    final newPos = _position - const Duration(seconds: 10);
-                    widget.player.seek(newPos < Duration.zero ? Duration.zero : newPos);
+                    if (_position.inSeconds < 2 && _currentSegmentIndex > 0) {
+                      _userRequestedPause = false;
+                      _playSegmentAtIndex(_currentSegmentIndex - 1, ++_synthesisGeneration);
+                    } else {
+                      final newPos = _position - const Duration(seconds: 10);
+                      widget.player.seek(newPos < Duration.zero ? Duration.zero : newPos);
+                    }
                   },
                 ),
                 GestureDetector(
@@ -2228,7 +2494,14 @@ class _PlayerScreenState extends State<PlayerScreen>
                     if (newPos < _duration) {
                       widget.player.seek(newPos);
                     } else if (_currentSegmentIndex + 1 < _segments.length) {
-                      _playSegmentAtIndex(_currentSegmentIndex + 1, _synthesisGeneration);
+                      _userRequestedPause = false;
+                      _playSegmentAtIndex(_currentSegmentIndex + 1, ++_synthesisGeneration);
+                    } else {
+                      final chIdx =
+                          widget.book.chapters.indexWhere((c) => c.id == _currentChapter.id);
+                      if (chIdx != -1 && chIdx + 1 < widget.book.chapters.length) {
+                        _startChapterPlayback(widget.book.chapters[chIdx + 1], startSegment: 0);
+                      }
                     }
                   },
                 ),

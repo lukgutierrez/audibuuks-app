@@ -45,11 +45,13 @@ class AudioPlayerService extends ChangeNotifier {
   bool isSynthesizing = false;
   bool userRequestedPause = false;
   bool isPlayerScreenMounted = false;
+  bool _wasSynthesizingBeforeForeground = false;
 
   int _bgSynthesisGen = 0;
   int _bgPrefetchGen = 0;
   bool _isHandlingBgCompletion = false;
   int _lastSavedSecond = -1;
+  Timer? _bgWatchdogTimer;
 
   // --- Estado del Temporizador de Sueño (Sleep Timer) ---
   Timer? _sleepTimer;
@@ -59,6 +61,12 @@ class AudioPlayerService extends ChangeNotifier {
   int? get sleepRemainingSeconds => _sleepRemainingSeconds;
   bool get sleepAtEndOfChapter => _sleepAtEndOfChapter;
   bool get isSleepTimerActive => _sleepRemainingSeconds != null || _sleepAtEndOfChapter;
+
+  bool consumeWasSynthesizingBeforeForeground() {
+    final val = _wasSynthesizingBeforeForeground;
+    _wasSynthesizingBeforeForeground = false;
+    return val;
+  }
 
   String get sleepTimerBadgeText {
     if (_sleepAtEndOfChapter) return 'Fin de cap.';
@@ -118,6 +126,27 @@ class AudioPlayerService extends ChangeNotifier {
     });
   }
 
+  void _startBackgroundWatchdog() {
+    _bgWatchdogTimer?.cancel();
+    _bgWatchdogTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+      if (isPlayerScreenMounted || userRequestedPause || currentBook == null || currentChapter == null) {
+        _bgWatchdogTimer?.cancel();
+        _bgWatchdogTimer = null;
+        return;
+      }
+      if (globalAudioPlayer.processingState == ProcessingState.completed &&
+          !_isHandlingBgCompletion &&
+          !isSynthesizing) {
+        _onBackgroundSegmentCompleted();
+      }
+    });
+  }
+
+  void _stopBackgroundWatchdog() {
+    _bgWatchdogTimer?.cancel();
+    _bgWatchdogTimer = null;
+  }
+
   /// Verifica si el reproductor ya tiene cargado y activo exactamente este libro, capítulo y párrafo.
   bool isSameActiveTarget(BookItem book, ChapterItem chapter, int segmentIndex) {
     return currentBook?.id == book.id &&
@@ -139,6 +168,7 @@ class AudioPlayerService extends ChangeNotifier {
     required String ambientTrackId,
     required bool pausedByUser,
     int? bufferedSegment,
+    bool? synthesizing,
   }) {
     currentBook = book;
     currentChapter = chapter;
@@ -146,6 +176,9 @@ class AudioPlayerService extends ChangeNotifier {
     currentSegmentIndex = segmentIndex;
     if (bufferedSegment != null) {
       bufferedUpToSegment = max(segmentIndex, bufferedSegment);
+    }
+    if (synthesizing != null) {
+      isSynthesizing = synthesizing;
     }
     selectedVoiceKey = voiceKey;
     selectedVoiceName = voiceName;
@@ -166,17 +199,36 @@ class AudioPlayerService extends ChangeNotifier {
   void setPlayerScreenMounted(bool mounted) {
     isPlayerScreenMounted = mounted;
     if (mounted) {
+      _stopBackgroundWatchdog();
+      _wasSynthesizingBeforeForeground = isSynthesizing || _isHandlingBgCompletion;
       _bgSynthesisGen++;
       _bgPrefetchGen++;
       _isHandlingBgCompletion = false;
+      isSynthesizing = false;
     } else if (!userRequestedPause && currentBook != null && currentChapter != null) {
       // Adquirir WakeLock de red y CPU para evitar cortes al viajar con la pantalla apagada
       NativeChannelService.acquireBackgroundLock();
-      // Si el párrafo ya había terminado justo en la transición a pantalla bloqueada, avanzar de inmediato
-      if (globalAudioPlayer.processingState == ProcessingState.completed &&
-          !_isHandlingBgCompletion &&
-          !isSynthesizing) {
+      _startBackgroundWatchdog();
+
+      final bool wasMidSynthesis = isSynthesizing;
+      final pState = globalAudioPlayer.processingState;
+
+      if (pState == ProcessingState.completed && !_isHandlingBgCompletion) {
+        isSynthesizing = false;
         _onBackgroundSegmentCompleted();
+      } else if (wasMidSynthesis ||
+          (!globalAudioPlayer.playing &&
+              (pState == ProcessingState.idle || globalAudioPlayer.audioSource == null))) {
+        // Si PlayerScreen estaba sintetizando el segmento al apagar pantalla/minimizar,
+        // el servicio toma la posta inmediatamente para que jamás se trabe a mitad de sección.
+        isSynthesizing = false;
+        _isHandlingBgCompletion = false;
+        _playBackgroundSegment(
+          book: currentBook!,
+          chapter: currentChapter!,
+          segments: currentSegments,
+          index: currentSegmentIndex,
+        );
       } else {
         _startBackgroundPrefetch(
           currentBook!,
@@ -185,6 +237,8 @@ class AudioPlayerService extends ChangeNotifier {
           selectedVoiceKey,
         );
       }
+    } else {
+      _stopBackgroundWatchdog();
     }
   }
 
@@ -193,15 +247,42 @@ class AudioPlayerService extends ChangeNotifier {
       userRequestedPause = false;
       NativeChannelService.acquireBackgroundLock();
       globalAudioPlayer.setVolume(1.0);
-      unawaited(globalAudioPlayer.play().catchError((_) {}));
-      if (ambientVolume > 0) {
-        NativeChannelService.setLoFiVolume(ambientVolume);
-        NativeChannelService.playLoFi();
+
+      final pState = globalAudioPlayer.processingState;
+      if (!isPlayerScreenMounted &&
+          currentBook != null &&
+          currentChapter != null &&
+          (globalAudioPlayer.audioSource == null ||
+              pState == ProcessingState.idle ||
+              pState == ProcessingState.completed)) {
+        _isHandlingBgCompletion = false;
+        if (pState == ProcessingState.completed) {
+          _onBackgroundSegmentCompleted();
+        } else {
+          _playBackgroundSegment(
+            book: currentBook!,
+            chapter: currentChapter!,
+            segments: currentSegments,
+            index: currentSegmentIndex,
+          );
+        }
+      } else {
+        unawaited(globalAudioPlayer.play().catchError((_) {}));
+        if (ambientVolume > 0) {
+          NativeChannelService.setLoFiVolume(ambientVolume);
+          NativeChannelService.playLoFi();
+        }
+        if (!isPlayerScreenMounted && currentBook != null && currentChapter != null) {
+          _startBackgroundWatchdog();
+        }
       }
     } else {
       userRequestedPause = true;
+      _stopBackgroundWatchdog();
       _bgSynthesisGen++;
       _bgPrefetchGen++;
+      _isHandlingBgCompletion = false;
+      isSynthesizing = false;
       NativeChannelService.pauseLoFi();
       NativeChannelService.releaseBackgroundLock();
       unawaited(globalAudioPlayer.pause().catchError((_) {}));
@@ -306,9 +387,11 @@ class AudioPlayerService extends ChangeNotifier {
     _sleepTimer = null;
     _sleepRemainingSeconds = null;
     _sleepAtEndOfChapter = false;
+    _stopBackgroundWatchdog();
     userRequestedPause = true;
     isPlaying = false;
     isSynthesizing = false;
+    _isHandlingBgCompletion = false;
     _bgSynthesisGen++;
     _bgPrefetchGen++;
 
@@ -345,63 +428,74 @@ class AudioPlayerService extends ChangeNotifier {
     }
 
     _isHandlingBgCompletion = true;
-    // Pausar la música ambiental inmediatamente mientras se prepara el siguiente segmento
     NativeChannelService.pauseLoFi();
 
     final book = currentBook!;
     final chapter = currentChapter!;
 
-    if (currentSegmentIndex + 1 < currentSegments.length) {
-      await _playBackgroundSegment(
-        book: book,
-        chapter: chapter,
-        segments: currentSegments,
-        index: currentSegmentIndex + 1,
-      );
-    } else {
-      if (consumeEndOfChapterSleepIfActive()) {
-        _isHandlingBgCompletion = false;
-        return;
-      }
-
-      final idx = book.chapters.indexWhere((c) => c.id == chapter.id);
-      if (idx != -1 && idx + 1 < book.chapters.length) {
-        ChapterItem nextChapter = book.chapters[idx + 1];
-
-        if (book.activeAudioLanguage == 'es' &&
-            (nextChapter.originalLanguageSegments == null ||
-                nextChapter.originalLanguageSegments!.isEmpty) &&
-            book.detectedLanguage == 'en') {
-          try {
-            nextChapter = await BookTranslationService.translateSingleChapter(nextChapter);
-            book.chapters[idx + 1] = nextChapter;
-            unawaited(_repository.updateSingleBookInStorage(book));
-          } catch (_) {}
-        }
-
-        final nextSegs = nextChapter.getSegmentsForLanguage(book.activeAudioLanguage);
-        currentChapter = nextChapter;
-        currentSegments = nextSegs;
-        currentSegmentIndex = 0;
-        bufferedUpToSegment = 0;
-        book.lastChapterIndex = idx + 1;
-        book.lastSegmentIndex = 0;
-        book.lastPositionMs = 0;
-        book.totalSegmentsInLastChapter = max(1, nextSegs.length);
-        unawaited(_repository.saveBookProgressFast(book));
-        notifyListeners();
-
+    try {
+      if (currentSegmentIndex + 1 < currentSegments.length) {
         await _playBackgroundSegment(
           book: book,
-          chapter: nextChapter,
-          segments: nextSegs,
-          index: 0,
+          chapter: chapter,
+          segments: currentSegments,
+          index: currentSegmentIndex + 1,
         );
       } else {
-        _isHandlingBgCompletion = false;
-        NativeChannelService.pauseLoFi();
-        NativeChannelService.releaseBackgroundLock();
+        if (consumeEndOfChapterSleepIfActive()) {
+          _isHandlingBgCompletion = false;
+          return;
+        }
+
+        final idx = book.chapters.indexWhere((c) => c.id == chapter.id);
+        if (idx != -1 && idx + 1 < book.chapters.length) {
+          ChapterItem nextChapter = book.chapters[idx + 1];
+
+          if (book.activeAudioLanguage == 'es' &&
+              (nextChapter.originalLanguageSegments == null ||
+                  nextChapter.originalLanguageSegments!.isEmpty) &&
+              book.detectedLanguage == 'en') {
+            try {
+              nextChapter = await BookTranslationService.translateSingleChapter(nextChapter);
+              book.chapters[idx + 1] = nextChapter;
+              unawaited(_repository.updateSingleBookInStorage(book));
+            } catch (_) {}
+          }
+
+          if (isPlayerScreenMounted || userRequestedPause) {
+            _isHandlingBgCompletion = false;
+            return;
+          }
+
+          final nextSegs = nextChapter.getSegmentsForLanguage(book.activeAudioLanguage);
+          currentChapter = nextChapter;
+          currentSegments = nextSegs;
+          currentSegmentIndex = 0;
+          bufferedUpToSegment = 0;
+          book.lastChapterIndex = idx + 1;
+          book.lastSegmentIndex = 0;
+          book.lastPositionMs = 0;
+          book.totalSegmentsInLastChapter = max(1, nextSegs.length);
+          unawaited(_repository.saveBookProgressFast(book));
+          notifyListeners();
+
+          await _playBackgroundSegment(
+            book: book,
+            chapter: nextChapter,
+            segments: nextSegs,
+            index: 0,
+          );
+        } else {
+          _isHandlingBgCompletion = false;
+          _stopBackgroundWatchdog();
+          NativeChannelService.pauseLoFi();
+          NativeChannelService.releaseBackgroundLock();
+        }
       }
+    } catch (_) {
+      _isHandlingBgCompletion = false;
+      isSynthesizing = false;
+      notifyListeners();
     }
   }
 
@@ -413,6 +507,7 @@ class AudioPlayerService extends ChangeNotifier {
   }) async {
     if (isPlayerScreenMounted || index < 0 || index >= segments.length) {
       _isHandlingBgCompletion = false;
+      isSynthesizing = false;
       return;
     }
 
@@ -436,96 +531,123 @@ class AudioPlayerService extends ChangeNotifier {
     final segText = segments[index];
     File? audioFile;
 
-    while (!isPlayerScreenMounted && gen == _bgSynthesisGen && !userRequestedPause) {
-      try {
-        isSynthesizing = true;
-        audioFile = await _ttsService.synthesizeSegment(
-          bookId: book.id,
-          chapter: chapter,
-          segIdx: index,
-          text: segText,
-          voiceKey: selectedVoiceKey,
-        );
-        break;
-      } catch (_) {
+    try {
+      const backoffDelaysMs = [900, 1800, 3000, 4500, 6500];
+      for (int attempt = 0; attempt <= backoffDelaysMs.length; attempt++) {
         if (isPlayerScreenMounted || gen != _bgSynthesisGen || userRequestedPause) {
-          isSynthesizing = false;
-          _isHandlingBgCompletion = false;
           return;
         }
-        await Future<void>.delayed(const Duration(milliseconds: 1800));
+        try {
+          isSynthesizing = true;
+          audioFile = await _ttsService.synthesizeSegment(
+            bookId: book.id,
+            chapter: chapter,
+            segIdx: index,
+            text: segText,
+            voiceKey: selectedVoiceKey,
+          );
+          break;
+        } catch (_) {
+          if (isPlayerScreenMounted || gen != _bgSynthesisGen || userRequestedPause) {
+            return;
+          }
+          if (attempt < backoffDelaysMs.length) {
+            await Future<void>.delayed(Duration(milliseconds: backoffDelaysMs[attempt]));
+          }
+        }
       }
-    }
 
-    if (audioFile == null ||
-        isPlayerScreenMounted ||
-        gen != _bgSynthesisGen ||
-        userRequestedPause) {
-      isSynthesizing = false;
-      _isHandlingBgCompletion = false;
-      return;
-    }
-
-    Uri? artUri;
-    try {
-      if (book.coverImagePath != null && await File(book.coverImagePath!).exists()) {
-        artUri = Uri.file(book.coverImagePath!);
-      } else if (book.coverUrl != null) {
-        artUri = Uri.parse(book.coverUrl!);
-      }
-    } catch (_) {}
-
-    for (int attempt = 0; attempt < 4; attempt++) {
-      if (isPlayerScreenMounted || gen != _bgSynthesisGen || userRequestedPause) {
-        isSynthesizing = false;
-        _isHandlingBgCompletion = false;
+      if (audioFile == null ||
+          isPlayerScreenMounted ||
+          gen != _bgSynthesisGen ||
+          userRequestedPause) {
+        if (audioFile == null && !isPlayerScreenMounted && gen == _bgSynthesisGen) {
+          // Liberar WakeLock si realmente no hay conexión tras todos los reintentos
+          NativeChannelService.releaseBackgroundLock();
+        }
         return;
       }
+
+      Uri? artUri;
       try {
-        await globalAudioPlayer.setAudioSource(
-          AudioSource.uri(
-            Uri.file(audioFile.path),
-            tag: MediaItem(
-              id: '${book.id}_${chapter.id}_$index',
-              album: book.title,
-              title: '${chapter.title} (${index + 1}/${segments.length})',
-              artist: book.author,
-              artUri: artUri,
-            ),
-          ),
-        );
-        await globalAudioPlayer.setSpeed(playbackSpeed);
-        try {
-          await globalAudioPlayer.setPitch(1.0);
-        } catch (_) {}
-
-        isSynthesizing = false;
-        _isHandlingBgCompletion = false;
-        bufferedUpToSegment = max(bufferedUpToSegment, index + 1);
-        notifyListeners();
-
-        if (!userRequestedPause && !isPlayerScreenMounted) {
-          unawaited(globalAudioPlayer.play().catchError((_) {}));
-          if (ambientVolume > 0) {
-            NativeChannelService.setLoFiVolume(ambientVolume);
-            NativeChannelService.playLoFi();
-          }
-          _startBackgroundPrefetch(book, chapter, index + 1, selectedVoiceKey);
+        if (book.coverImagePath != null && await File(book.coverImagePath!).exists()) {
+          artUri = Uri.file(book.coverImagePath!);
+        } else if (book.coverUrl != null) {
+          artUri = Uri.parse(book.coverUrl!);
         }
-        break;
-      } catch (_) {
-        if (attempt == 3) {
+      } catch (_) {}
+
+      File currentFile = audioFile;
+      for (int attempt = 0; attempt < 3; attempt++) {
+        if (isPlayerScreenMounted || gen != _bgSynthesisGen || userRequestedPause) {
+          return;
+        }
+        try {
+          await globalAudioPlayer.setAudioSource(
+            AudioSource.uri(
+              Uri.file(currentFile.path),
+              tag: MediaItem(
+                id: '${book.id}_${chapter.id}_$index',
+                album: book.title,
+                title: '${chapter.title} (${index + 1}/${segments.length})',
+                artist: book.author,
+                artUri: artUri,
+              ),
+            ),
+          );
+          await globalAudioPlayer.setSpeed(playbackSpeed);
+          try {
+            await globalAudioPlayer.setPitch(1.0);
+          } catch (_) {}
+
           isSynthesizing = false;
           _isHandlingBgCompletion = false;
+          bufferedUpToSegment = max(bufferedUpToSegment, index + 1);
           notifyListeners();
-        } else {
-          await Future<void>.delayed(const Duration(milliseconds: 150));
+
+          if (!userRequestedPause && !isPlayerScreenMounted) {
+            unawaited(globalAudioPlayer.play().catchError((_) {}));
+            if (ambientVolume > 0) {
+              NativeChannelService.setLoFiVolume(ambientVolume);
+              NativeChannelService.playLoFi();
+            }
+            _startBackgroundPrefetch(book, chapter, index + 1, selectedVoiceKey);
+          }
+          break;
+        } catch (_) {
+          // Si el MP3 en caché estaba corrupto, borrarlo y resintetizar automáticamente
+          if (attempt == 0) {
+            await _ttsService.invalidateCorruptedSegment(
+              bookId: book.id,
+              chapter: chapter,
+              segIdx: index,
+              voiceKey: selectedVoiceKey,
+              text: segText,
+            );
+            try {
+              currentFile = await _ttsService.synthesizeSegment(
+                bookId: book.id,
+                chapter: chapter,
+                segIdx: index,
+                text: segText,
+                voiceKey: selectedVoiceKey,
+              );
+            } catch (_) {}
+          } else {
+            await Future<void>.delayed(const Duration(milliseconds: 220));
+          }
         }
+      }
+    } finally {
+      if (gen == _bgSynthesisGen) {
+        isSynthesizing = false;
+        _isHandlingBgCompletion = false;
+        notifyListeners();
       }
     }
   }
 
-  /// Pre-carga toda la sección actual en segundo plano (estilo YouTube) para no depender de señal móvil
+  /// Pre-carga paralela (3 workers) de toda la sección actual en segundo plano (estilo YouTube)
   Future<void> _startBackgroundPrefetch(
     BookItem book,
     ChapterItem chapter,
@@ -534,64 +656,130 @@ class AudioPlayerService extends ChangeNotifier {
   ) async {
     final prefetchId = ++_bgPrefetchGen;
     final segs = chapter.getSegmentsForLanguage(book.activeAudioLanguage);
+    if (startIdx >= segs.length) return;
 
+    bool shouldAbort() =>
+        isPlayerScreenMounted ||
+        prefetchId != _bgPrefetchGen ||
+        currentChapter?.id != chapter.id ||
+        userRequestedPause;
+
+    final cachedKeys = await _ttsService.getCachedKeysForBook(book.id);
+    if (shouldAbort()) return;
+
+    final Set<int> completed = {};
+    final List<int> missing = [];
     for (int i = startIdx; i < segs.length; i++) {
-      if (isPlayerScreenMounted ||
-          prefetchId != _bgPrefetchGen ||
-          currentChapter?.id != chapter.id ||
-          userRequestedPause) {
-        return;
+      final segKey = _ttsService.segmentKeyId(book.id, chapter, i, voiceKey, text: segs[i]);
+      if (cachedKeys.contains(segKey)) {
+        completed.add(i);
+      } else {
+        missing.add(i);
       }
-      bool ok = false;
+    }
+
+    int contiguous = startIdx;
+    while (completed.contains(contiguous) && contiguous < segs.length) {
+      contiguous++;
+    }
+    if (contiguous > bufferedUpToSegment) {
+      bufferedUpToSegment = contiguous;
+      notifyListeners();
+    }
+
+    // 1. Prioridad máxima al siguiente segmento inmediato para 0ms de espera
+    if (missing.isNotEmpty && missing.first == startIdx) {
+      final firstIdx = missing.removeAt(0);
       for (int retry = 0; retry < 3; retry++) {
-        if (isPlayerScreenMounted ||
-            prefetchId != _bgPrefetchGen ||
-            currentChapter?.id != chapter.id ||
-            userRequestedPause) {
-          return;
-        }
+        if (shouldAbort()) return;
         try {
           await _ttsService.synthesizeSegment(
             bookId: book.id,
             chapter: chapter,
-            segIdx: i,
-            text: segs[i],
+            segIdx: firstIdx,
+            text: segs[firstIdx],
             voiceKey: voiceKey,
           );
-          ok = true;
+          completed.add(firstIdx);
+          while (completed.contains(contiguous) && contiguous < segs.length) {
+            contiguous++;
+          }
+          if (contiguous > bufferedUpToSegment) {
+            bufferedUpToSegment = contiguous;
+            notifyListeners();
+          }
           break;
         } catch (_) {
-          await Future<void>.delayed(const Duration(milliseconds: 1500));
+          await Future<void>.delayed(Duration(milliseconds: 800 * (retry + 1)));
         }
-      }
-      if (ok && currentChapter?.id == chapter.id) {
-        bufferedUpToSegment = max(bufferedUpToSegment, i + 1);
-        notifyListeners();
       }
     }
 
-    // Pre-cargar también los primeros 4 párrafos del capítulo siguiente
+    // 2. Pool paralelo de 3 workers para llenar el resto de la sección 3x más rápido
+    if (missing.isNotEmpty && !shouldAbort()) {
+      int cursor = 0;
+      DateTime lastNotify = DateTime.now();
+
+      Future<void> worker() async {
+        while (!shouldAbort()) {
+          if (cursor >= missing.length) return;
+          final idx = missing[cursor++];
+          for (int retry = 0; retry < 3; retry++) {
+            if (shouldAbort()) return;
+            try {
+              await _ttsService.synthesizeSegment(
+                bookId: book.id,
+                chapter: chapter,
+                segIdx: idx,
+                text: segs[idx],
+                voiceKey: voiceKey,
+              );
+              completed.add(idx);
+              while (completed.contains(contiguous) && contiguous < segs.length) {
+                contiguous++;
+              }
+              if (contiguous > bufferedUpToSegment) {
+                bufferedUpToSegment = contiguous;
+                final now = DateTime.now();
+                if (now.difference(lastNotify).inMilliseconds >= 250 ||
+                    contiguous >= segs.length) {
+                  lastNotify = now;
+                  notifyListeners();
+                }
+              }
+              break;
+            } catch (_) {
+              await Future<void>.delayed(Duration(milliseconds: 900 * (retry + 1)));
+            }
+          }
+        }
+      }
+
+      await Future.wait(List.generate(min(3, missing.length), (_) => worker()));
+    }
+
+    if (shouldAbort()) return;
+
+    // 3. Pre-cargar también los primeros 4 párrafos del capítulo siguiente en paralelo
     final chIdx = book.chapters.indexWhere((c) => c.id == chapter.id);
     if (chIdx != -1 && chIdx + 1 < book.chapters.length) {
       final nextCh = book.chapters[chIdx + 1];
       final nextSegs = nextCh.getSegmentsForLanguage(book.activeAudioLanguage);
-      for (int k = 0; k < min(4, nextSegs.length); k++) {
-        if (isPlayerScreenMounted ||
-            prefetchId != _bgPrefetchGen ||
-            currentChapter?.id != chapter.id ||
-            userRequestedPause) {
-          return;
-        }
-        try {
-          await _ttsService.synthesizeSegment(
-            bookId: book.id,
-            chapter: nextCh,
-            segIdx: k,
-            text: nextSegs[k],
-            voiceKey: voiceKey,
-          );
-        } catch (_) {}
-      }
+      final int lookahead = min(4, nextSegs.length);
+      await Future.wait(
+        List.generate(lookahead, (k) async {
+          if (shouldAbort()) return;
+          try {
+            await _ttsService.synthesizeSegment(
+              bookId: book.id,
+              chapter: nextCh,
+              segIdx: k,
+              text: nextSegs[k],
+              voiceKey: voiceKey,
+            );
+          } catch (_) {}
+        }),
+      );
     }
   }
 }

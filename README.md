@@ -2,7 +2,7 @@
   <img src="docs/screenshots/logo.png" width="130" alt="Audibuuks Logo" style="border-radius: 50%;" />
 </p>
 
-<h1 align="center">Audibuuks (v1.0.0)</h1>
+<h1 align="center">Audibuuks (v1.1.0)</h1>
 
 <p align="center">
   <b>El lector y reproductor inteligente de audiolibros definitivo para Android.</b><br/>
@@ -10,6 +10,7 @@
 </p>
 
 <p align="center">
+  <a href="https://lukgutierrez.github.io/audibuuks-app/"><img src="https://img.shields.io/badge/Sitio%20Web-Audibuuks%20Oficial-F5A623?style=for-the-badge&logo=googlechrome&logoColor=black" alt="Sitio Web Oficial"></a>
   <a href="https://github.com/lukgutierrez/audibuuks-app/releases"><img src="https://img.shields.io/github/v/release/lukgutierrez/audibuuks-app?color=F5A623&label=Release&style=for-the-badge" alt="Release"></a>
   <img src="https://img.shields.io/badge/Flutter-3.x-02569B?style=for-the-badge&logo=flutter&logoColor=white" alt="Flutter">
   <img src="https://img.shields.io/badge/Dart-3.x-0175C2?style=for-the-badge&logo=dart&logoColor=white" alt="Dart">
@@ -84,12 +85,12 @@ lib/
 
 ## 📥 Descarga e Instalación
 
-Podés descargar el APK directamente desde la sección de **[Releases](https://github.com/lukgutierrez/audibuuks-app/releases)**:
+Podés descargar el APK desde el **[Sitio Web Oficial](https://lukgutierrez.github.io/audibuuks-app/)** o directamente desde **[GitHub Releases](https://github.com/lukgutierrez/audibuuks-app/releases)**:
 
-1. Descargá **`Audibuuks_v1.0.0_arm64-v8a.apk`** (versión recomendada, sólo **21 MB**).
+1. Descargá **`Audibuuks_v1.1.0_arm64-v8a.apk`** (versión recomendada, sólo **~21 MB**).
 2. Abrí el archivo en tu celular Android.
 3. Si el sistema lo solicita, autorizá *"Instalar aplicaciones de fuentes desconocidas"*.
-4. ¡Listo! Ya podés disfrutar de tu biblioteca en cualquier lugar.
+4. ¡Listo! Las futuras versiones te aparecerán automáticamente **dentro de la app** para actualizar con 1 toque sin perder tus libros ni notas.
 
 ---
 
@@ -109,4 +110,5 @@ Podés descargar el APK directamente desde la sección de **[Releases](https://g
 **Luciano Gutierrez (Lukgtz)**  
 - GitHub: [@lukgutierrez](https://github.com/lukgutierrez)  
 - Proyecto: **Audibuuks Mobile**  
-- Versión: **1.0.0 (Build 2011)**  
+- Sitio Web: [lukgutierrez.github.io/audibuuks-app](https://lukgutierrez.github.io/audibuuks-app/)  
+- Versión: **1.1.0 (Build 2015)**  

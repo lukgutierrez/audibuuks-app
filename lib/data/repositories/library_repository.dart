@@ -1,11 +1,13 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../../core/utils/text_sanitizer.dart';
 import '../../domain/models/book_item.dart';
 import '../../domain/models/chapter_item.dart';
+import '../services/cloud_book_downloader_service.dart';
 import '../services/pdf_extractor_service.dart';
 
 /// Repositorio único de verdad para la Biblioteca, progreso ultraligero y preferencias del reproductor
@@ -135,7 +137,9 @@ class LibraryRepository {
               fileType: b.fileType,
               detectedLanguage: b.detectedLanguage,
               activeAudioLanguage: b.activeAudioLanguage,
-              lastChapterIndex: b.lastChapterIndex.clamp(0, cleanChapters.length - 1),
+              lastChapterIndex: cleanChapters.isEmpty
+                  ? 0
+                  : b.lastChapterIndex.clamp(0, max<int>(0, cleanChapters.length - 1)),
               lastSegmentIndex: b.lastSegmentIndex,
               lastPositionMs: b.lastPositionMs,
               totalSegmentsInLastChapter: b.totalSegmentsInLastChapter,
@@ -182,7 +186,18 @@ class LibraryRepository {
     final List<String> newList = [];
 
     for (final raw in currentList) {
-      if (!replaced && raw.contains('"id":"${updatedBook.id}"')) {
+      bool isTarget = false;
+      if (!replaced) {
+        try {
+          final decoded = jsonDecode(raw);
+          if (decoded is Map && decoded['id'] == updatedBook.id) {
+            isTarget = true;
+          }
+        } catch (_) {
+          isTarget = raw.contains('"id":"${updatedBook.id}"');
+        }
+      }
+      if (isTarget) {
         newList.add(updatedJson);
         replaced = true;
       } else {
@@ -262,7 +277,8 @@ class LibraryRepository {
     if (!await booksDir.exists()) {
       await booksDir.create(recursive: true);
     }
-    final permanentFilePath = '${booksDir.path}/${bookId}_$fileName';
+    final safeName = CloudBookDownloaderService.sanitizeFileName(fileName);
+    final permanentFilePath = '${booksDir.path}/${bookId}_$safeName';
     await File(permanentFilePath).writeAsBytes(bytes, flush: true);
     return permanentFilePath;
   }

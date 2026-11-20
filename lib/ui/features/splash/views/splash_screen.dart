@@ -330,7 +330,7 @@ class _SplashScreenState extends State<SplashScreen>
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              'VERSION 1.0.0',
+                              'VERSION 1.1.0',
                               style: GoogleFonts.jetBrainsMono(
                                 color: const Color(0xFF141414)
                                     .withValues(alpha: 0.82),

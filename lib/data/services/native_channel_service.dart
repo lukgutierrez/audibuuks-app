@@ -126,4 +126,44 @@ class NativeChannelService {
     }
     return null;
   }
+
+  static Future<Map<String, dynamic>?> getAppVersionInfo() async {
+    try {
+      final res = await channel.invokeMethod('getAppVersionInfo');
+      if (res is Map) {
+        return Map<String, dynamic>.from(res);
+      }
+    } catch (e) {
+      debugPrint('getAppVersionInfo notice: $e');
+    }
+    return null;
+  }
+
+  static Future<bool> canRequestPackageInstalls() async {
+    try {
+      final res = await channel.invokeMethod<bool>('canRequestPackageInstalls');
+      return res ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  static Future<bool> openInstallPermissionSettings() async {
+    try {
+      final res = await channel.invokeMethod<bool>('openInstallPermissionSettings');
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  static Future<bool> installApk(String filePath) async {
+    try {
+      final res = await channel.invokeMethod<bool>('installApk', {'path': filePath});
+      return res ?? false;
+    } catch (e) {
+      debugPrint('installApk notice: $e');
+      return false;
+    }
+  }
 }

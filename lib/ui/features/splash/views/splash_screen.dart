@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:google_fonts/google_fonts.dart';
 
+import '../../../../data/services/native_channel_service.dart';
 import '../../library/views/library_screen.dart';
 
 class SplashScreen extends StatefulWidget {
@@ -31,10 +32,12 @@ class _SplashScreenState extends State<SplashScreen>
   late final Animation<double> _footerSlide;
 
   Timer? _navTimer;
+  String _versionLabel = '1.1.1';
 
   @override
   void initState() {
     super.initState();
+    _loadInstalledVersion();
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -115,6 +118,14 @@ class _SplashScreenState extends State<SplashScreen>
     _entranceController.forward();
 
     _navTimer = Timer(const Duration(milliseconds: 3300), _goToLibrary);
+  }
+
+  Future<void> _loadInstalledVersion() async {
+    final info = await NativeChannelService.getAppVersionInfo();
+    final vName = info?['versionName'] as String?;
+    if (mounted && vName != null && vName.trim().isNotEmpty) {
+      setState(() => _versionLabel = vName.trim());
+    }
   }
 
   void _goToLibrary() {
@@ -330,7 +341,7 @@ class _SplashScreenState extends State<SplashScreen>
                             ),
                             const SizedBox(height: 8),
                             Text(
-                              'VERSION 1.1.0',
+                              'VERSION $_versionLabel',
                               style: GoogleFonts.jetBrainsMono(
                                 color: const Color(0xFF141414)
                                     .withValues(alpha: 0.82),

@@ -174,34 +174,43 @@ class CoverService {
     required String bookId,
     required String bookTitle,
     required Uint8List pdfBytes,
+    String? existingPdfPath,
   }) async {
     final docDir = await getApplicationDocumentsDirectory();
-    final coverFile = File('${docDir.path}/cover_$bookId.jpg');
+    final coverFile = File('${docDir.path}/cover_${bookId}_${DateTime.now().millisecondsSinceEpoch}.jpg');
 
-    final embeddedJpeg = extractEmbeddedJpegFromPdf(pdfBytes);
-    if (embeddedJpeg != null) {
-      await coverFile.writeAsBytes(embeddedJpeg);
-      return {'path': coverFile.path, 'url': null};
-    }
-
+    // 1. PRIORIDAD #1: Renderizar la PÁGINA 1 EXACTA del PDF con Android PdfRenderer nativo.
+    // Evita el bug de escanear bytes binarios al azar y terminar agarrando una imagen de la página 3.
+    File? tempPdf;
     try {
-      final tempPdf = File('${docDir.path}/temp_$bookId.pdf');
-      await tempPdf.writeAsBytes(pdfBytes);
+      final String targetPdfPath;
+      if (existingPdfPath != null && await File(existingPdfPath).exists()) {
+        targetPdfPath = existingPdfPath;
+      } else {
+        tempPdf = File('${docDir.path}/temp_$bookId.pdf');
+        await tempPdf.writeAsBytes(pdfBytes, flush: true);
+        targetPdfPath = tempPdf.path;
+      }
+
       final renderedBytes = await NativeChannelService.channel.invokeMethod<Uint8List>(
         'renderFirstPage',
-        {'path': tempPdf.path},
+        {'path': targetPdfPath},
       );
-      if (await tempPdf.exists()) {
-        await tempPdf.delete();
-      }
       if (renderedBytes != null && renderedBytes.length > 1000) {
-        await coverFile.writeAsBytes(renderedBytes);
+        await coverFile.writeAsBytes(renderedBytes, flush: true);
         return {'path': coverFile.path, 'url': null};
       }
     } catch (e) {
       debugPrint('Native PdfRenderer notice: $e');
+    } finally {
+      try {
+        if (tempPdf != null && await tempPdf.exists()) {
+          await tempPdf.delete();
+        }
+      } catch (_) {}
     }
 
+    // 2. Fallback online si el render nativo no está disponible (ej. escritorio)
     final onlineUrl = await fetchOnlineCoverUrl(bookTitle);
     if (onlineUrl != null) {
       final client = HttpClient()..connectionTimeout = const Duration(seconds: 5);
@@ -211,7 +220,7 @@ class CoverService {
         if (res.statusCode == 200) {
           final imgBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
           if (imgBytes.length > 1000) {
-            await coverFile.writeAsBytes(imgBytes);
+            await coverFile.writeAsBytes(imgBytes, flush: true);
             return {'path': coverFile.path, 'url': onlineUrl};
           }
         }
@@ -221,6 +230,85 @@ class CoverService {
       }
     }
 
+    // 3. Último recurso: JPEG embebido
+    final embeddedJpeg = extractEmbeddedJpegFromPdf(pdfBytes);
+    if (embeddedJpeg != null) {
+      await coverFile.writeAsBytes(embeddedJpeg, flush: true);
+      return {'path': coverFile.path, 'url': null};
+    }
+
     return {'path': null, 'url': onlineUrl};
+  }
+
+  /// Guarda una nueva portada personalizada (desde galería, página del PDF o internet) y refresca caché de imagen
+  static Future<String> saveCustomCoverBytes({
+    required String bookId,
+    required Uint8List bytes,
+    String? previousCoverPath,
+  }) async {
+    final docDir = await getApplicationDocumentsDirectory();
+    final newFile = File('${docDir.path}/cover_${bookId}_${DateTime.now().millisecondsSinceEpoch}.jpg');
+    await newFile.writeAsBytes(bytes, flush: true);
+
+    if (previousCoverPath != null && previousCoverPath.isNotEmpty) {
+      try {
+        final oldFile = File(previousCoverPath);
+        FileImage(oldFile).evict();
+        if (await oldFile.exists() && oldFile.path != newFile.path) {
+          await oldFile.delete();
+        }
+      } catch (_) {}
+    }
+    return newFile.path;
+  }
+
+  /// Renderiza una página específica del PDF (0-based) y la guarda como nueva portada oficial del libro
+  static Future<String?> setPdfPageAsCover({
+    required String bookId,
+    required String pdfPath,
+    required int pageIndex,
+    String? previousCoverPath,
+  }) async {
+    final res = await NativeChannelService.renderPdfPage(pdfPath, pageIndex, width: 720);
+    final bytes = res?['bytes'];
+    if (bytes is Uint8List && bytes.length > 1000) {
+      return saveCustomCoverBytes(
+        bookId: bookId,
+        bytes: bytes,
+        previousCoverPath: previousCoverPath,
+      );
+    }
+    return null;
+  }
+
+  /// Descarga la portada online por título y la guarda localmente
+  static Future<({String? path, String? url})> fetchAndSaveOnlineCover({
+    required String bookId,
+    required String bookTitle,
+    String? previousCoverPath,
+  }) async {
+    final url = await fetchOnlineCoverUrl(bookTitle);
+    if (url == null) return (path: null, url: null);
+
+    final client = HttpClient()..connectionTimeout = const Duration(seconds: 6);
+    try {
+      final req = await client.getUrl(Uri.parse(url));
+      final res = await req.close().timeout(const Duration(seconds: 6));
+      if (res.statusCode == 200) {
+        final raw = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+        if (raw.length > 1000) {
+          final saved = await saveCustomCoverBytes(
+            bookId: bookId,
+            bytes: Uint8List.fromList(raw),
+            previousCoverPath: previousCoverPath,
+          );
+          return (path: saved, url: url);
+        }
+      }
+    } catch (_) {
+    } finally {
+      client.close(force: true);
+    }
+    return (path: null, url: url);
   }
 }

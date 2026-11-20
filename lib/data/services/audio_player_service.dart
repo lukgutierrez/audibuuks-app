@@ -12,8 +12,15 @@ import 'book_translation_service.dart';
 import 'native_channel_service.dart';
 import 'tts_synthesis_service.dart';
 
+/// Potenciador nativo de volumen de voz en Android (hardware compressor/limiter sin distorsión).
+final AndroidLoudnessEnhancer globalLoudnessEnhancer = AndroidLoudnessEnhancer();
+
 /// Singleton global de AudioPlayer requerido por `just_audio_background`.
-final AudioPlayer globalAudioPlayer = AudioPlayer();
+final AudioPlayer globalAudioPlayer = AudioPlayer(
+  audioPipeline: Platform.isAndroid
+      ? AudioPipeline(androidAudioEffects: [globalLoudnessEnhancer])
+      : null,
+);
 
 /// Instancia global del motor persistente de reproducción y Temporizador de Sueño (Sleep Timer).
 final AudioPlayerService audioPlayerService = AudioPlayerService();
@@ -83,6 +90,8 @@ class AudioPlayerService extends ChangeNotifier {
   }
 
   void _initBackgroundListeners() {
+    unawaited(_configureVoiceLoudnessBoost());
+
     globalAudioPlayer.playerStateStream.listen((state) {
       final bool activelySpeaking = state.playing &&
           state.processingState == ProcessingState.ready &&
@@ -124,6 +133,20 @@ class AudioPlayerService extends ChangeNotifier {
         }
       }
     });
+  }
+
+  Future<void> _configureVoiceLoudnessBoost() async {
+    try {
+      await globalAudioPlayer.setVolume(1.0);
+      if (Platform.isAndroid) {
+        // Realce limpio de +8.5 dB con limitador hardware de Android para que las voces Edge-TTS
+        // suenen claras y potentes sin tener que subir el volumen del celular al 100%.
+        await globalLoudnessEnhancer.setEnabled(true);
+        await globalLoudnessEnhancer.setTargetGain(8.5);
+      }
+    } catch (e) {
+      debugPrint('Voice loudness boost notice: $e');
+    }
   }
 
   void _startBackgroundWatchdog() {

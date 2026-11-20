@@ -355,7 +355,7 @@ class TtsSynthesisService {
         voice: voiceKey,
         rate: '-4%',
         pitch: '-2Hz',
-        volume: '+0%',
+        volume: '+25%',
         wordBoundary: true,
       );
 

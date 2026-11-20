@@ -2,7 +2,7 @@
   <img src="docs/screenshots/logo.png" width="130" alt="Audibuuks Logo" style="border-radius: 50%;" />
 </p>
 
-<h1 align="center">Audibuuks (v1.1.0)</h1>
+<h1 align="center">Audibuuks (v1.1.1)</h1>
 
 <p align="center">
   <b>El lector y reproductor inteligente de audiolibros definitivo para Android.</b><br/>
@@ -87,7 +87,7 @@ lib/
 
 Podés descargar el APK desde el **[Sitio Web Oficial](https://lukgutierrez.github.io/audibuuks-app/)** o directamente desde **[GitHub Releases](https://github.com/lukgutierrez/audibuuks-app/releases)**:
 
-1. Descargá **`Audibuuks_v1.1.0_arm64-v8a.apk`** (versión recomendada, sólo **~21 MB**).
+1. Descargá **`Audibuuks_v1.1.1_arm64-v8a.apk`** (versión recomendada, sólo **~22 MB**).
 2. Abrí el archivo en tu celular Android.
 3. Si el sistema lo solicita, autorizá *"Instalar aplicaciones de fuentes desconocidas"*.
 4. ¡Listo! Las futuras versiones te aparecerán automáticamente **dentro de la app** para actualizar con 1 toque sin perder tus libros ni notas.
@@ -111,4 +111,4 @@ Podés descargar el APK desde el **[Sitio Web Oficial](https://lukgutierrez.gith
 - GitHub: [@lukgutierrez](https://github.com/lukgutierrez)  
 - Proyecto: **Audibuuks Mobile**  
 - Sitio Web: [lukgutierrez.github.io/audibuuks-app](https://lukgutierrez.github.io/audibuuks-app/)  
-- Versión: **1.1.0 (Build 2015)**  
+- Versión: **1.1.1 (Build 2016)**  

@@ -214,7 +214,7 @@
       if (!res.ok) throw new Error("No release yet");
       const release = await res.json();
 
-      const tag = release.tag_name || "v1.1.0";
+      const tag = release.tag_name || "v1.1.1";
       const apks = (release.assets || []).filter((a) =>
         (a.name || "").toLowerCase().endsWith(".apk")
       );

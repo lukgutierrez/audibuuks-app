@@ -210,6 +210,10 @@ class MainActivity : AudioServiceActivity() {
         } catch (_: Exception) {}
     }
 
+    private fun effectiveLofiGain(vol: Float): Float {
+        return (vol * 0.42f).coerceIn(0f, 1f)
+    }
+
     private fun setupAndPreparePlayer(path: String, autoStart: Boolean) {
         try {
             currentTrackPath = path
@@ -233,7 +237,8 @@ class MainActivity : AudioServiceActivity() {
             )
             mp.setDataSource(path)
             mp.isLooping = true
-            mp.setVolume(lofiVolume, lofiVolume)
+            val scaledVol = effectiveLofiGain(lofiVolume)
+            mp.setVolume(scaledVol, scaledVol)
             mp.setOnPreparedListener { readyPlayer ->
                 if (readyPlayer !== lofiPlayer) {
                     try {
@@ -242,7 +247,8 @@ class MainActivity : AudioServiceActivity() {
                     return@setOnPreparedListener
                 }
                 lofiPrepared = true
-                readyPlayer.setVolume(lofiVolume, lofiVolume)
+                val readyVol = effectiveLofiGain(lofiVolume)
+                readyPlayer.setVolume(readyVol, readyVol)
                 if (autoStart && isAllowedToPlay && lofiVolume > 0f) {
                     try {
                         readyPlayer.start()
@@ -404,7 +410,7 @@ class MainActivity : AudioServiceActivity() {
                             }
                             if (renderer.pageCount > 0) {
                                 val page = renderer.openPage(0)
-                                val width = 650
+                                val width = 720
                                 val height = (width.toFloat() / page.width * page.height).toInt().coerceAtLeast(1)
                                 val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
                                 bitmap.eraseColor(Color.WHITE)
@@ -412,7 +418,7 @@ class MainActivity : AudioServiceActivity() {
                                 page.close()
 
                                 val stream = ByteArrayOutputStream()
-                                bitmap.compress(Bitmap.CompressFormat.JPEG, 86, stream)
+                                bitmap.compress(Bitmap.CompressFormat.JPEG, 90, stream)
                                 bitmap.recycle()
                                 val bytes = stream.toByteArray()
                                 runOnUiThread { result.success(bytes) }
@@ -534,8 +540,62 @@ class MainActivity : AudioServiceActivity() {
                                     }
                                 }
 
+                                // 1. Buscar la portada oficial declarada en el manifiesto OPF (EPUB 3 cover-image / EPUB 2 meta cover)
+                                if (opfContent != null) {
+                                    var declaredCoverHref: String? = null
+                                    val propCoverRegex = Regex(
+                                        """<item\s+[^>]*properties=["'][^"']*cover-image[^"']*["'][^>]*href=["']([^"']+)["']""",
+                                        RegexOption.IGNORE_CASE
+                                    )
+                                    val propCoverRegex2 = Regex(
+                                        """<item\s+[^>]*href=["']([^"']+)["'][^>]*properties=["'][^"']*cover-image[^"']*["']""",
+                                        RegexOption.IGNORE_CASE
+                                    )
+                                    declaredCoverHref = propCoverRegex.find(opfContent!!)?.groupValues?.get(1)
+                                        ?: propCoverRegex2.find(opfContent!!)?.groupValues?.get(1)
+
+                                    if (declaredCoverHref == null) {
+                                        val metaCoverRegex = Regex(
+                                            """<meta\s+[^>]*name=["']cover["'][^>]*content=["']([^"']+)["']""",
+                                            RegexOption.IGNORE_CASE
+                                        )
+                                        val metaCoverRegex2 = Regex(
+                                            """<meta\s+[^>]*content=["']([^"']+)["'][^>]*name=["']cover["']""",
+                                            RegexOption.IGNORE_CASE
+                                        )
+                                        val coverId = metaCoverRegex.find(opfContent!!)?.groupValues?.get(1)
+                                            ?: metaCoverRegex2.find(opfContent!!)?.groupValues?.get(1)
+                                        if (coverId != null) {
+                                            val idMatch = Regex(
+                                                """<item\s+[^>]*id=["']${Regex.escape(coverId)}["'][^>]*href=["']([^"']+)["']""",
+                                                RegexOption.IGNORE_CASE
+                                            ).find(opfContent!!)
+                                                ?: Regex(
+                                                    """<item\s+[^>]*href=["']([^"']+)["'][^>]*id=["']${Regex.escape(coverId)}["']""",
+                                                    RegexOption.IGNORE_CASE
+                                                ).find(opfContent!!)
+                                            declaredCoverHref = idMatch?.groupValues?.get(1)
+                                        }
+                                    }
+
+                                    if (declaredCoverHref != null) {
+                                        val cleanHref = declaredCoverHref.substringBefore('#').trimStart('/')
+                                        val exactEntry = zip.getEntry(opfDir + cleanHref) ?: zip.getEntry(cleanHref)
+                                        if (exactEntry != null && !exactEntry.isDirectory) {
+                                            val b = zip.getInputStream(exactEntry).use {
+                                                readZipEntryBounded(it, maxCoverBytes)
+                                            }
+                                            if (b != null && b.size > 1000) {
+                                                coverBytes = b
+                                            }
+                                        }
+                                    }
+                                }
+
+                                // 2. Fallback: primera imagen ordenada alfabéticamente si no hubo portada declarada
                                 if (coverBytes == null) {
                                     var imgCount = 0
+                                    val candidateImgNames = mutableListOf<String>()
                                     val imgEntries = zip.entries()
                                     while (imgEntries.hasMoreElements()) {
                                         if (++imgCount > maxEntries) break
@@ -543,12 +603,18 @@ class MainActivity : AudioServiceActivity() {
                                         if (entry.isDirectory) continue
                                         val lower = entry.name.lowercase()
                                         if (lower.endsWith(".jpg") || lower.endsWith(".jpeg") || lower.endsWith(".png")) {
-                                            val b = zip.getInputStream(entry).use {
-                                                readZipEntryBounded(it, maxCoverBytes)
-                                            }
-                                            if (b != null && b.size > 4000 && (coverBytes == null || b.size > coverBytes!!.size)) {
-                                                coverBytes = b
-                                            }
+                                            candidateImgNames.add(entry.name)
+                                        }
+                                    }
+                                    candidateImgNames.sort()
+                                    for (imgName in candidateImgNames) {
+                                        val entry = zip.getEntry(imgName) ?: continue
+                                        val b = zip.getInputStream(entry).use {
+                                            readZipEntryBounded(it, maxCoverBytes)
+                                        }
+                                        if (b != null && b.size > 4000) {
+                                            coverBytes = b
+                                            break
                                         }
                                     }
                                 }
@@ -621,7 +687,8 @@ class MainActivity : AudioServiceActivity() {
                         if (lofiPlayer == null && path != null) {
                             setupAndPreparePlayer(path, true)
                         } else if (lofiPlayer != null && lofiPrepared && lofiVolume > 0f) {
-                            lofiPlayer?.setVolume(lofiVolume, lofiVolume)
+                            val scaled = effectiveLofiGain(lofiVolume)
+                            lofiPlayer?.setVolume(scaled, scaled)
                             if (!lofiPlayer!!.isPlaying) {
                                 lofiPlayer?.start()
                             }
@@ -659,7 +726,8 @@ class MainActivity : AudioServiceActivity() {
                                 }
                             }
                         } else if (isAllowedToPlay && lofiPlayer != null && lofiPrepared) {
-                            lofiPlayer?.setVolume(vol, vol)
+                            val scaled = effectiveLofiGain(vol)
+                            lofiPlayer?.setVolume(scaled, scaled)
                             if (!lofiPlayer!!.isPlaying) {
                                 lofiPlayer?.start()
                             }

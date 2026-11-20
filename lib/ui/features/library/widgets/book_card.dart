@@ -10,6 +10,7 @@ class BookCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onToggleFavorite;
   final VoidCallback onViewDocument;
+  final VoidCallback? onChangeCover;
   final VoidCallback onDelete;
 
   const BookCard({
@@ -18,6 +19,7 @@ class BookCard extends StatelessWidget {
     required this.onTap,
     required this.onToggleFavorite,
     required this.onViewDocument,
+    this.onChangeCover,
     required this.onDelete,
   });
 
@@ -104,6 +106,8 @@ class BookCard extends StatelessWidget {
                                 onSelected: (val) {
                                   if (val == 'view') {
                                     onViewDocument();
+                                  } else if (val == 'cover') {
+                                    onChangeCover?.call();
                                   } else if (val == 'delete') {
                                     onDelete();
                                   }
@@ -121,6 +125,20 @@ class BookCard extends StatelessWidget {
                                               ? 'Ver / Leer EPUB'
                                               : 'Ver / Leer PDF',
                                           style: const TextStyle(fontWeight: FontWeight.w600),
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  const PopupMenuItem(
+                                    value: 'cover',
+                                    child: Row(
+                                      children: [
+                                        Icon(Icons.image_outlined,
+                                            color: Color(0xFFF5A623), size: 18),
+                                        SizedBox(width: 10),
+                                        Text(
+                                          'Cambiar portada',
+                                          style: TextStyle(fontWeight: FontWeight.w600),
                                         ),
                                       ],
                                     ),

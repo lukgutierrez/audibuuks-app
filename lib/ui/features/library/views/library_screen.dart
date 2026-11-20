@@ -352,6 +352,7 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
           bookId: bookId,
           bookTitle: bookTitle,
           pdfBytes: bytes,
+          existingPdfPath: permanentFilePath,
         );
 
         final receivePort = ReceivePort();
@@ -836,6 +837,119 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
     );
   }
 
+  Future<void> _showChangeCoverSheet(BookItem book) async {
+    final bool hasPdf = book.originalFilePath != null &&
+        book.originalFilePath!.toLowerCase().endsWith('.pdf') &&
+        File(book.originalFilePath!).existsSync();
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: const Color(0xFF181A20),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetCtx) {
+        return _CoverPickerSheet(
+          book: book,
+          hasPdf: hasPdf,
+          onSelectPdfPage: (pageIdx) async {
+            Navigator.pop(sheetCtx);
+            final newPath = await CoverService.setPdfPageAsCover(
+              bookId: book.id,
+              pdfPath: book.originalFilePath!,
+              pageIndex: pageIdx,
+              previousCoverPath: book.coverImagePath,
+            );
+            if (newPath != null && mounted) {
+              setState(() {
+                book.coverImagePath = newPath;
+                book.coverUrl = null;
+              });
+              await _saveBooks();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('Portada actualizada a la página ${pageIdx + 1} ✅'),
+                    backgroundColor: const Color(0xFF1F242D),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            }
+          },
+          onPickFromGallery: () async {
+            Navigator.pop(sheetCtx);
+            const imgGroup = XTypeGroup(
+              label: 'Imagen de portada',
+              extensions: ['jpg', 'jpeg', 'png', 'webp'],
+              mimeTypes: ['image/jpeg', 'image/png', 'image/webp'],
+            );
+            final picked = await openFile(acceptedTypeGroups: [imgGroup]);
+            if (picked == null) return;
+            final imgBytes = await picked.readAsBytes();
+            if (imgBytes.length < 200) return;
+            final newPath = await CoverService.saveCustomCoverBytes(
+              bookId: book.id,
+              bytes: imgBytes,
+              previousCoverPath: book.coverImagePath,
+            );
+            if (mounted) {
+              setState(() {
+                book.coverImagePath = newPath;
+                book.coverUrl = null;
+              });
+              await _saveBooks();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('Portada personalizada guardada ✅'),
+                    backgroundColor: Color(0xFF1F242D),
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            }
+          },
+          onFetchOnlineCover: () async {
+            Navigator.pop(sheetCtx);
+            final res = await CoverService.fetchAndSaveOnlineCover(
+              bookId: book.id,
+              bookTitle: book.title,
+              previousCoverPath: book.coverImagePath,
+            );
+            if (mounted) {
+              if (res.path != null) {
+                setState(() {
+                  book.coverImagePath = res.path;
+                  book.coverUrl = res.url;
+                });
+                await _saveBooks();
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(
+                      content: Text('Portada oficial encontrada y aplicada ✅'),
+                      backgroundColor: Color(0xFF1F242D),
+                      behavior: SnackBarBehavior.floating,
+                    ),
+                  );
+                }
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                    content: Text('No se encontró portada online para este título'),
+                    backgroundColor: Colors.orangeAccent,
+                    behavior: SnackBarBehavior.floating,
+                  ),
+                );
+              }
+            }
+          },
+        );
+      },
+    );
+  }
+
   void _confirmDeleteBook(BookItem book) {
     showDialog(
       context: context,
@@ -1201,6 +1315,7 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
                                     _saveBooks();
                                   },
                                   onViewDocument: () => _openDocumentViewer(book),
+                                  onChangeCover: () => _showChangeCoverSheet(book),
                                   onDelete: () => _confirmDeleteBook(book),
                                 ),
                               );
@@ -1306,6 +1421,207 @@ class _LibraryScreenState extends State<LibraryScreen> with WidgetsBindingObserv
               ),
             ),
         ],
+      ),
+    );
+  }
+}
+
+class _CoverPickerSheet extends StatefulWidget {
+  final BookItem book;
+  final bool hasPdf;
+  final ValueChanged<int> onSelectPdfPage;
+  final VoidCallback onPickFromGallery;
+  final VoidCallback onFetchOnlineCover;
+
+  const _CoverPickerSheet({
+    required this.book,
+    required this.hasPdf,
+    required this.onSelectPdfPage,
+    required this.onPickFromGallery,
+    required this.onFetchOnlineCover,
+  });
+
+  @override
+  State<_CoverPickerSheet> createState() => _CoverPickerSheetState();
+}
+
+class _CoverPickerSheetState extends State<_CoverPickerSheet> {
+  final List<({int pageIndex, Uint8List bytes})> _pdfThumbs = [];
+  bool _loadingThumbs = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (widget.hasPdf) {
+      _loadPdfPreviewPages();
+    }
+  }
+
+  Future<void> _loadPdfPreviewPages() async {
+    final path = widget.book.originalFilePath;
+    if (path == null) return;
+    setState(() => _loadingThumbs = true);
+
+    try {
+      final first = await NativeChannelService.renderPdfPage(path, 0, width: 280);
+      if (first == null || !mounted) {
+        if (mounted) setState(() => _loadingThumbs = false);
+        return;
+      }
+      final totalPages = (first['pageCount'] as int?) ?? 1;
+      final firstBytes = first['bytes'];
+      if (firstBytes is Uint8List) {
+        setState(() => _pdfThumbs.add((pageIndex: 0, bytes: firstBytes)));
+      }
+
+      final int previewCount = min(6, totalPages);
+      for (int p = 1; p < previewCount; p++) {
+        if (!mounted) return;
+        final res = await NativeChannelService.renderPdfPage(path, p, width: 280);
+        final bytes = res?['bytes'];
+        if (bytes is Uint8List && mounted) {
+          setState(() => _pdfThumbs.add((pageIndex: p, bytes: bytes)));
+        }
+      }
+    } finally {
+      if (mounted) setState(() => _loadingThumbs = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 14, 20, 22),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text(
+              'Cambiar portada del libro',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w800,
+                fontSize: 18,
+              ),
+            ),
+            const SizedBox(height: 4),
+            Text(
+              widget.book.title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: const TextStyle(color: Colors.white54, fontSize: 12.5),
+            ),
+            if (widget.hasPdf) ...[
+              const SizedBox(height: 16),
+              const Text(
+                'Elegí una página de tu PDF como portada:',
+                style: TextStyle(
+                  color: Color(0xFFF5A623),
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                ),
+              ),
+              const SizedBox(height: 10),
+              SizedBox(
+                height: 138,
+                child: _pdfThumbs.isEmpty && _loadingThumbs
+                    ? const Center(
+                        child: CircularProgressIndicator(color: Color(0xFFF5A623)),
+                      )
+                    : ListView.separated(
+                        scrollDirection: Axis.horizontal,
+                        itemCount: _pdfThumbs.length,
+                        separatorBuilder: (_, _) => const SizedBox(width: 10),
+                        itemBuilder: (ctx, i) {
+                          final item = _pdfThumbs[i];
+                          return GestureDetector(
+                            onTap: () => widget.onSelectPdfPage(item.pageIndex),
+                            child: Column(
+                              children: [
+                                Expanded(
+                                  child: ClipRRect(
+                                    borderRadius: BorderRadius.circular(10),
+                                    child: Container(
+                                      decoration: BoxDecoration(
+                                        border: Border.all(
+                                          color: item.pageIndex == 0
+                                              ? const Color(0xFFF5A623)
+                                              : Colors.white24,
+                                          width: item.pageIndex == 0 ? 1.8 : 1,
+                                        ),
+                                        borderRadius: BorderRadius.circular(10),
+                                      ),
+                                      child: Image.memory(
+                                        item.bytes,
+                                        fit: BoxFit.cover,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 5),
+                                Text(
+                                  'Pág. ${item.pageIndex + 1}',
+                                  style: TextStyle(
+                                    color: item.pageIndex == 0
+                                        ? const Color(0xFFF5A623)
+                                        : Colors.white70,
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+              ),
+            ],
+            const SizedBox(height: 16),
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              tileColor: Colors.white.withValues(alpha: 0.05),
+              leading: const Icon(Icons.photo_library_outlined, color: Color(0xFFF5A623)),
+              title: const Text(
+                'Elegir imagen de mi galería',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+              ),
+              subtitle: const Text(
+                'Seleccioná cualquier foto JPG o PNG guardada en tu celular',
+                style: TextStyle(color: Colors.white54, fontSize: 11.5),
+              ),
+              onTap: widget.onPickFromGallery,
+            ),
+            const SizedBox(height: 10),
+            ListTile(
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+              tileColor: Colors.white.withValues(alpha: 0.05),
+              leading: const Icon(Icons.travel_explore_rounded, color: Color(0xFFF5A623)),
+              title: const Text(
+                'Buscar portada oficial online',
+                style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700, fontSize: 14),
+              ),
+              subtitle: const Text(
+                'Busca automáticamente la tapa del libro por su título',
+                style: TextStyle(color: Colors.white54, fontSize: 11.5),
+              ),
+              onTap: widget.onFetchOnlineCover,
+            ),
+          ],
+        ),
       ),
     );
   }
